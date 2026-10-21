@@ -1,3 +1,4 @@
+#![allow(unused_imports, dead_code)]
 use crate::capture::capture_desktop_frame;
 use crate::input::handle_control_message;
 use crate::types::ControlMessage;
@@ -31,27 +32,30 @@ impl EmbeddedHostServer {
     }
 
     pub fn start_background(self: Arc<Self>) {
-        // Task 1: Dedicated High-FPS Frame Capture Engine (decoupled from network & Tokio executor)
-        let tx = self.frame_tx.clone();
-        std::thread::Builder::new()
-            .name("capture-engine".into())
-            .spawn(move || {
-                let target_interval = Duration::from_millis(16); // Target ~60 FPS
-                loop {
-                    let start = std::time::Instant::now();
-                    let (frame_bytes, _) = capture_desktop_frame();
-                    if !frame_bytes.is_empty() {
-                        let _ = tx.send(frame_bytes);
+        // Task 1: Dedicated High-FPS Frame Capture Engine (Linux host only)
+        #[cfg(target_os = "linux")]
+        {
+            let tx = self.frame_tx.clone();
+            std::thread::Builder::new()
+                .name("capture-engine".into())
+                .spawn(move || {
+                    let target_interval = Duration::from_millis(16); // Target ~60 FPS
+                    loop {
+                        let start = std::time::Instant::now();
+                        let (frame_bytes, _) = capture_desktop_frame();
+                        if !frame_bytes.is_empty() {
+                            let _ = tx.send(frame_bytes);
+                        }
+                        let elapsed = start.elapsed();
+                        if elapsed < target_interval {
+                            std::thread::sleep(target_interval - elapsed);
+                        } else {
+                            std::thread::sleep(Duration::from_millis(1));
+                        }
                     }
-                    let elapsed = start.elapsed();
-                    if elapsed < target_interval {
-                        std::thread::sleep(target_interval - elapsed);
-                    } else {
-                        std::thread::sleep(Duration::from_millis(1));
-                    }
-                }
-            })
-            .expect("failed to spawn capture engine thread");
+                })
+                .expect("failed to spawn capture engine thread");
+        }
 
         // Task 2: High-Performance TCP Streaming Server with Port Fallback
         let this = self.clone();
