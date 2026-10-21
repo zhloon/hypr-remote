@@ -123,6 +123,9 @@ fn send_input_to_remote(
             match tokio::net::TcpStream::connect(addr).await {
                 Ok(mut stream) => {
                     let _ = stream.set_nodelay(true);
+                    let sock_ref = socket2::SockRef::from(&stream);
+                    let _ = sock_ref.set_send_buffer_size(65536);
+                    let _ = sock_ref.set_recv_buffer_size(65536);
                     let init_req = format!(
                         "POST /input_stream HTTP/1.1\r\n\
                         Host: {}\r\n\

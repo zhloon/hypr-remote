@@ -116,6 +116,9 @@ impl EmbeddedHostServer {
 
     async fn handle_connection(&self, mut stream: TcpStream) {
         let _ = stream.set_nodelay(true);
+        let sock_ref = socket2::SockRef::from(&stream);
+        let _ = sock_ref.set_send_buffer_size(524288);
+        let _ = sock_ref.set_recv_buffer_size(131072);
         let mut buf = [0u8; 4096];
         let bytes_read = match stream.read(&mut buf).await {
             Ok(n) if n > 0 => n,
