@@ -5,25 +5,115 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::UdpSocket;
 
-pub fn get_local_ip() -> String {
-    // 1. Try public DNS (finds default LAN interface)
-    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
-        if socket.connect("114.114.114.114:80").is_ok() || socket.connect("8.8.8.8:80").is_ok() {
-            if let Ok(addr) = socket.local_addr() {
-                let ip = addr.ip().to_string();
-                if !ip.starts_with("127.") && ip != "0.0.0.0" {
-                    return ip;
+#[derive(Clone, Debug)]
+pub struct NetInterface {
+    pub name: String,
+    pub ip: String,
+    pub broadcast: Option<String>,
+}
+
+#[cfg(unix)]
+pub fn get_active_interfaces() -> Vec<NetInterface> {
+    let mut result = Vec::new();
+    unsafe {
+        let mut ifaddrs_ptr: *mut libc::ifaddrs = std::ptr::null_mut();
+        if libc::getifaddrs(&mut ifaddrs_ptr) != 0 || ifaddrs_ptr.is_null() {
+            return result;
+        }
+
+        let mut curr = ifaddrs_ptr;
+        while !curr.is_null() {
+            let ifa = &*curr;
+            let flags = ifa.ifa_flags as i32;
+
+            let is_up = (flags & libc::IFF_UP) != 0;
+            let is_running = (flags & libc::IFF_RUNNING) != 0;
+            let is_loopback = (flags & libc::IFF_LOOPBACK) != 0;
+
+            if is_up && is_running && !is_loopback && !ifa.ifa_addr.is_null() {
+                let name = std::ffi::CStr::from_ptr(ifa.ifa_name).to_string_lossy().to_string();
+
+                let is_virtual = name.starts_with("utun")
+                    || name.starts_with("tun")
+                    || name.starts_with("tap")
+                    || name.starts_with("gif")
+                    || name.starts_with("stf")
+                    || name.starts_with("awdl")
+                    || name.starts_with("llw")
+                    || name.starts_with("docker")
+                    || name.starts_with("veth");
+
+                if !is_virtual && (*ifa.ifa_addr).sa_family == libc::AF_INET as libc::sa_family_t {
+                    let sin = &*(ifa.ifa_addr as *const libc::sockaddr_in);
+                    let ip = std::net::Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr));
+                    let ip_str = ip.to_string();
+
+                    let is_valid_lan = (ip.is_private() || ip_str.starts_with("192.168.") || ip_str.starts_with("10.") || ip_str.starts_with("172."))
+                        && !ip_str.starts_with("198.18.")
+                        && !ip_str.starts_with("169.254.")
+                        && !ip_str.starts_with("127.");
+
+                    if is_valid_lan {
+                        let mut broadcast_str = None;
+                        // On macOS/BSD ifa_dstaddr holds the broadcast address when IFF_BROADCAST is set
+                        if !ifa.ifa_dstaddr.is_null() {
+                            let sin_broad = &*(ifa.ifa_dstaddr as *const libc::sockaddr_in);
+                            let broad_ip = std::net::Ipv4Addr::from(u32::from_be(sin_broad.sin_addr.s_addr));
+                            broadcast_str = Some(broad_ip.to_string());
+                        }
+
+                        result.push(NetInterface {
+                            name,
+                            ip: ip_str,
+                            broadcast: broadcast_str,
+                        });
+                    }
                 }
             }
+            curr = ifa.ifa_next;
+        }
+
+        libc::freeifaddrs(ifaddrs_ptr);
+    }
+    result
+}
+
+#[cfg(windows)]
+pub fn get_active_interfaces() -> Vec<NetInterface> {
+    Vec::new()
+}
+
+pub fn get_local_ip() -> String {
+    let ifaces = get_active_interfaces();
+    // 1. Prefer 192.168.x.x
+    for iface in &ifaces {
+        if iface.ip.starts_with("192.168.") {
+            return iface.ip.clone();
         }
     }
-    // 2. Try common gateway probes (works on offline LANs)
-    for gw in ["192.168.1.1:80", "192.168.0.1:80", "192.168.31.1:80", "10.0.0.1:80"] {
+    // 2. Next 10.x.x.x
+    for iface in &ifaces {
+        if iface.ip.starts_with("10.") {
+            return iface.ip.clone();
+        }
+    }
+    // 3. Next 172.x.x.x
+    for iface in &ifaces {
+        if iface.ip.starts_with("172.") {
+            return iface.ip.clone();
+        }
+    }
+    if let Some(first) = ifaces.first() {
+        return first.ip.clone();
+    }
+
+    // Fallback: gateway UDP probe
+    for gw in ["192.168.1.1:80", "192.168.0.1:80", "192.168.31.1:80", "192.168.5.1:80", "10.0.0.1:80"] {
         if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
             if socket.connect(gw).is_ok() {
                 if let Ok(addr) = socket.local_addr() {
                     let ip = addr.ip().to_string();
-                    if !ip.starts_with("127.") && ip != "0.0.0.0" {
+                    if !ip.starts_with("127.") && !ip.starts_with("198.18.") && ip != "0.0.0.0" {
                         return ip;
                     }
                 }
@@ -31,6 +121,102 @@ pub fn get_local_ip() -> String {
         }
     }
     "127.0.0.1".to_string()
+}
+
+
+fn create_udp_socket(port: u16) -> Option<std::net::UdpSocket> {
+    #[cfg(unix)]
+    unsafe {
+        use std::os::unix::io::FromRawFd;
+        let fd = libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0);
+        if fd >= 0 {
+            let opt: libc::c_int = 1;
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_REUSEADDR,
+                &opt as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&opt) as u32,
+            );
+            #[cfg(not(target_os = "windows"))]
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_REUSEPORT,
+                &opt as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&opt) as u32,
+            );
+
+            let mut addr: libc::sockaddr_in = std::mem::zeroed();
+            addr.sin_family = libc::AF_INET as libc::sa_family_t;
+            addr.sin_port = port.to_be();
+            addr.sin_addr.s_addr = libc::INADDR_ANY;
+
+            if libc::bind(
+                fd,
+                &addr as *const _ as *const libc::sockaddr,
+                std::mem::size_of_val(&addr) as u32,
+            ) == 0
+            {
+                let sock = std::net::UdpSocket::from_raw_fd(fd);
+                let _ = sock.set_broadcast(true);
+                let _ = sock.set_nonblocking(true);
+                return Some(sock);
+            } else {
+                libc::close(fd);
+            }
+        }
+    }
+
+    // Fallback standard bind
+    if let Ok(sock) = std::net::UdpSocket::bind(format!("0.0.0.0:{}", port)) {
+        let _ = sock.set_broadcast(true);
+        let _ = sock.set_nonblocking(true);
+        return Some(sock);
+    }
+    None
+}
+
+fn get_broadcast_targets(local_ip: &str) -> Vec<SocketAddr> {
+    let mut targets = std::collections::HashSet::new();
+    targets.insert("255.255.255.255:8082".parse().unwrap());
+
+    // 1. Interfaces broadcast addresses
+    for iface in get_active_interfaces() {
+        if let Some(b) = iface.broadcast {
+            if let Ok(addr) = format!("{}:8082", b).parse() {
+                targets.insert(addr);
+            }
+        }
+        if let Some(idx) = iface.ip.rfind('.') {
+            if let Ok(addr) = format!("{}.255:8082", &iface.ip[..idx]).parse() {
+                targets.insert(addr);
+            }
+        }
+    }
+
+    // 2. Also derive from local_ip
+    if let Some(idx) = local_ip.rfind('.') {
+        if let Ok(addr) = format!("{}.255:8082", &local_ip[..idx]).parse() {
+            targets.insert(addr);
+        }
+    }
+
+    // 3. Common fallback subnets
+    for sub in &[
+        "192.168.1.255:8082",
+        "192.168.0.255:8082",
+        "192.168.31.255:8082",
+        "192.168.2.255:8082",
+        "192.168.5.255:8082",
+        "10.0.0.255:8082",
+    ] {
+        if let Ok(addr) = sub.parse() {
+            targets.insert(addr);
+        }
+    }
+
+    targets.into_iter().collect()
 }
 
 pub struct DiscoveryManager {
@@ -105,46 +291,72 @@ impl DiscoveryManager {
     pub fn start_background(self: Arc<Self>) {
         let this = self.clone();
         tauri::async_runtime::spawn(async move {
-            let bind_addr: SocketAddr = "0.0.0.0:8082".parse().unwrap();
-            let socket = match UdpSocket::bind(bind_addr).await {
-                Ok(s) => Arc::new(s),
-                Err(e) => {
-                    eprintln!("[Discovery] Cannot bind UDP 8082: {e}");
+            let std_sock = match create_udp_socket(8082) {
+                Some(s) => s,
+                None => {
+                    eprintln!("[Discovery] Cannot bind UDP 8082 with SO_REUSEPORT");
                     return;
                 }
             };
 
-            let _ = socket.set_broadcast(true);
+            let socket = match UdpSocket::from_std(std_sock) {
+                Ok(s) => Arc::new(s),
+                Err(e) => {
+                    eprintln!("[Discovery] Error wrapping socket into Tokio: {e}");
+                    return;
+                }
+            };
 
-            let broadcast_targets: Vec<SocketAddr> = vec![
-                "255.255.255.255:8082".parse().unwrap(),
-                "192.168.1.255:8082".parse().unwrap(),
-                "192.168.0.255:8082".parse().unwrap(),
-                "192.168.31.255:8082".parse().unwrap(),
-                "192.168.2.255:8082".parse().unwrap(),
-                "192.168.50.255:8082".parse().unwrap(),
-                "10.0.0.255:8082".parse().unwrap(),
-            ];
-
-            // Task 1: Periodic broadcast
+            // Task 1: Periodic Subnet & Multi-Subnet Broadcast
             let s_send = socket.clone();
             let my_info = this.my_info.clone();
             tauri::async_runtime::spawn(async move {
                 let clean_code = my_info.code.replace(" ", "");
                 loop {
+                    let cur_ip = get_local_ip();
+                    let targets = get_broadcast_targets(&cur_ip);
                     let beacon_msg = format!(
                         "HYPR_BEACON:{}:{}:{}:{}:{}",
                         clean_code, my_info.pin, my_info.port, my_info.hostname, my_info.os
                     );
 
-                    for target in &broadcast_targets {
+                    for target in &targets {
                         let _ = s_send.send_to(beacon_msg.as_bytes(), target).await;
                     }
                     tokio::time::sleep(Duration::from_millis(1500)).await;
                 }
             });
 
-            // Task 2: Listen for beacons
+            // Task 2: Active Unicast LAN Subnet Sweep (Bypasses Router AP Isolation & Broadcast Filters!)
+            let s_sweep = socket.clone();
+            let my_info_sweep = this.my_info.clone();
+            tauri::async_runtime::spawn(async move {
+                let clean_code = my_info_sweep.code.replace(" ", "");
+                loop {
+                    let cur_ip = get_local_ip();
+                    if let Some(idx) = cur_ip.rfind('.') {
+                        let prefix = &cur_ip[..=idx]; // e.g. "192.168.5."
+                        let my_last_octet = cur_ip[idx + 1..].parse::<u8>().unwrap_or(0);
+                        let beacon_msg = format!(
+                            "HYPR_BEACON:{}:{}:{}:{}:{}",
+                            clean_code, my_info_sweep.pin, my_info_sweep.port, my_info_sweep.hostname, my_info_sweep.os
+                        );
+                        let bytes = beacon_msg.as_bytes();
+
+                        for host in 1..=254 {
+                            if host == my_last_octet {
+                                continue;
+                            }
+                            if let Ok(target) = format!("{}{}:8082", prefix, host).parse::<SocketAddr>() {
+                                let _ = s_sweep.send_to(bytes, target).await;
+                            }
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(3500)).await;
+                }
+            });
+
+            // Task 3: Listen for incoming beacons & instant reply
             let mut buf = [0u8; 1024];
             let clean_my_code = this.my_info.code.replace(" ", "");
 
@@ -165,7 +377,7 @@ impl DiscoveryManager {
                                     let port = parts[3].parse::<u16>().unwrap_or(18080);
                                     let hostname = parts[4].to_string();
                                     let os = parts[5].to_string();
-                                    let real_ip = sender_ip.to_string(); // Always use verified network packet IP!
+                                    let real_ip = sender_ip.to_string();
 
                                     let formatted_code = if code.len() == 6 {
                                         format!("{} {}", &code[..3], &code[3..])
@@ -178,18 +390,28 @@ impl DiscoveryManager {
                                         .unwrap()
                                         .as_millis() as u64;
 
-                                    let mut map = this.devices.lock().unwrap();
-                                    map.insert(
-                                        code.to_string(),
-                                        LanDevice {
-                                            code: formatted_code,
-                                            hostname,
-                                            os,
-                                            ip: real_ip,
-                                            port,
-                                            last_seen_ms: now_ms,
-                                        },
+                                    {
+                                        let mut map = this.devices.lock().unwrap();
+                                        map.insert(
+                                            code.to_string(),
+                                            LanDevice {
+                                                code: formatted_code,
+                                                hostname,
+                                                os,
+                                                ip: real_ip,
+                                                port,
+                                                last_seen_ms: now_ms,
+                                            },
+                                        );
+                                    }
+
+                                    // Send immediate unicast reply so peer discovers us instantly
+                                    let reply_msg = format!(
+                                        "HYPR_BEACON:{}:{}:{}:{}:{}",
+                                        clean_my_code, this.my_info.pin, this.my_info.port, this.my_info.hostname, this.my_info.os
                                     );
+                                    let reply_target = SocketAddr::new(sender_ip, 8082);
+                                    let _ = socket.send_to(reply_msg.as_bytes(), reply_target).await;
                                 }
                             }
                         }
@@ -199,3 +421,5 @@ impl DiscoveryManager {
         });
     }
 }
+
+

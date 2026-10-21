@@ -49,6 +49,7 @@ fi
 # 4. 启动客户端
 echo "[3/3] 正在检查端口并启动 HyprRemote..."
 fuser -k 18080/tcp 2>/dev/null || true
+fuser -k 8082/udp 2>/dev/null || true
 pkill -f hypr-remote-client 2>/dev/null || true
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
