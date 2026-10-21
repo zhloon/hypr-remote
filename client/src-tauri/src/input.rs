@@ -168,20 +168,44 @@ fn dispatch_key(code: u16, down: bool) {
 // Linux / Hyprland Input Implementation
 // ==========================================
 #[cfg(target_os = "linux")]
+fn send_hyprland_cmd(cmd: &str) -> bool {
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+
+    let sig = std::env::var("HYPRLAND_INSTANCE_SIGNATURE").unwrap_or_default();
+    let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/run/user/1000".to_string());
+
+    let socket_path = format!("{}/hypr/{}/.socket.sock", runtime_dir, sig);
+    if let Ok(mut stream) = UnixStream::connect(&socket_path) {
+        let msg = format!("[[/]]{}\n", cmd);
+        if stream.write_all(msg.as_bytes()).is_ok() {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(target_os = "linux")]
 fn dispatch_mouse_move(x: f32, y: f32, dx: i32, dy: i32, is_rel: bool) {
     if is_rel {
-        let _ = std::process::Command::new("hyprctl")
-            .args(["dispatch", "movecursor", &format!("{:+}", dx), &format!("{:+}", dy)])
-            .spawn();
+        let cmd = format!("dispatch movecursor {:+} {:+}", dx, dy);
+        if !send_hyprland_cmd(&cmd) {
+            let _ = std::process::Command::new("hyprctl")
+                .args(["dispatch", "movecursor", &format!("{:+}", dx), &format!("{:+}", dy)])
+                .spawn();
+        }
     } else {
         let screen_w = CURRENT_SCREEN_WIDTH.load(Ordering::Relaxed) as f32;
         let screen_h = CURRENT_SCREEN_HEIGHT.load(Ordering::Relaxed) as f32;
         let px = (x * screen_w) as i32;
         let py = (y * screen_h) as i32;
 
-        let _ = std::process::Command::new("hyprctl")
-            .args(["dispatch", "movecursor", &px.to_string(), &py.to_string()])
-            .spawn();
+        let cmd = format!("dispatch movecursor {} {}", px, py);
+        if !send_hyprland_cmd(&cmd) {
+            let _ = std::process::Command::new("hyprctl")
+                .args(["dispatch", "movecursor", &px.to_string(), &py.to_string()])
+                .spawn();
+        }
     }
 }
 

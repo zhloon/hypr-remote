@@ -5,11 +5,28 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::UdpSocket;
 
-fn get_local_ip() -> String {
+pub fn get_local_ip() -> String {
+    // 1. Try public DNS (finds default LAN interface)
     if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
-        if socket.connect("8.8.8.8:80").is_ok() {
+        if socket.connect("114.114.114.114:80").is_ok() || socket.connect("8.8.8.8:80").is_ok() {
             if let Ok(addr) = socket.local_addr() {
-                return addr.ip().to_string();
+                let ip = addr.ip().to_string();
+                if !ip.starts_with("127.") && ip != "0.0.0.0" {
+                    return ip;
+                }
+            }
+        }
+    }
+    // 2. Try common gateway probes (works on offline LANs)
+    for gw in ["192.168.1.1:80", "192.168.0.1:80", "192.168.31.1:80", "10.0.0.1:80"] {
+        if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
+            if socket.connect(gw).is_ok() {
+                if let Ok(addr) = socket.local_addr() {
+                    let ip = addr.ip().to_string();
+                    if !ip.starts_with("127.") && ip != "0.0.0.0" {
+                        return ip;
+                    }
+                }
             }
         }
     }
@@ -23,12 +40,6 @@ pub struct DiscoveryManager {
 
 impl DiscoveryManager {
     pub fn new(port: u16) -> Self {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
-        let num1 = (now % 900 + 100) as u32;
-        let num2 = ((now / 1000) % 900 + 100) as u32;
-        let code = format!("{} {}", num1, num2);
-        let pin = format!("{:04}", (now % 9000 + 1000) as u32);
-
         let hostname = std::env::var("HOSTNAME")
             .or_else(|_| std::env::var("COMPUTERNAME"))
             .or_else(|_| std::env::var("USER"))
@@ -36,6 +47,17 @@ impl DiscoveryManager {
 
         let os = std::env::consts::OS.to_string();
         let local_ip = get_local_ip();
+
+        // Generate distinct code per machine based on hash
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(&hostname, &mut hasher);
+        std::hash::Hash::hash(&os, &mut hasher);
+        std::hash::Hash::hash(&SystemTime::now(), &mut hasher);
+        let h = std::hash::Hasher::finish(&hasher);
+        let num1 = (h % 900 + 100) as u32;
+        let num2 = ((h / 1000) % 900 + 100) as u32;
+        let code = format!("{} {}", num1, num2);
+        let pin = format!("{:04}", (h % 9000 + 1000) as u32);
 
         let my_info = MyDeviceInfo {
             code,
@@ -54,8 +76,12 @@ impl DiscoveryManager {
 
     pub fn get_my_info(&self) -> MyDeviceInfo {
         let mut info = self.my_info.clone();
-        info.local_ip = get_local_ip(); // Refresh dynamic IP
+        info.local_ip = get_local_ip();
         info
+    }
+
+    pub fn set_port(&mut self, port: u16) {
+        self.my_info.port = port;
     }
 
     pub fn get_devices(&self) -> Vec<LanDevice> {
@@ -90,7 +116,6 @@ impl DiscoveryManager {
 
             let _ = socket.set_broadcast(true);
 
-            // Broadcast targets (standard + common home router subnets to bypass AP isolation)
             let broadcast_targets: Vec<SocketAddr> = vec![
                 "255.255.255.255:8082".parse().unwrap(),
                 "192.168.1.255:8082".parse().unwrap(),
@@ -101,16 +126,15 @@ impl DiscoveryManager {
                 "10.0.0.255:8082".parse().unwrap(),
             ];
 
-            // Task 1: Periodic broadcast across all targets
+            // Task 1: Periodic broadcast
             let s_send = socket.clone();
             let my_info = this.my_info.clone();
             tauri::async_runtime::spawn(async move {
                 let clean_code = my_info.code.replace(" ", "");
                 loop {
-                    let cur_ip = get_local_ip();
                     let beacon_msg = format!(
-                        "HYPR_BEACON:{}:{}:{}:{}:{}:{}",
-                        clean_code, my_info.pin, my_info.port, my_info.hostname, my_info.os, cur_ip
+                        "HYPR_BEACON:{}:{}:{}:{}:{}",
+                        clean_code, my_info.pin, my_info.port, my_info.hostname, my_info.os
                     );
 
                     for target in &broadcast_targets {
@@ -126,6 +150,12 @@ impl DiscoveryManager {
 
             loop {
                 if let Ok((len, src)) = socket.recv_from(&mut buf).await {
+                    let sender_ip = src.ip();
+                    // STRICT RULE: Never record loopback IP as a LAN device!
+                    if sender_ip.is_loopback() {
+                        continue;
+                    }
+
                     if let Ok(text) = std::str::from_utf8(&buf[..len]) {
                         if text.starts_with("HYPR_BEACON:") {
                             let parts: Vec<&str> = text.split(':').collect();
@@ -135,12 +165,7 @@ impl DiscoveryManager {
                                     let port = parts[3].parse::<u16>().unwrap_or(18080);
                                     let hostname = parts[4].to_string();
                                     let os = parts[5].to_string();
-                                    // Use IP declared in beacon or fallback to packet source
-                                    let ip = if parts.len() >= 7 && parts[6].contains('.') {
-                                        parts[6].to_string()
-                                    } else {
-                                        src.ip().to_string()
-                                    };
+                                    let real_ip = sender_ip.to_string(); // Always use verified network packet IP!
 
                                     let formatted_code = if code.len() == 6 {
                                         format!("{} {}", &code[..3], &code[3..])
@@ -160,7 +185,7 @@ impl DiscoveryManager {
                                             code: formatted_code,
                                             hostname,
                                             os,
-                                            ip,
+                                            ip: real_ip,
                                             port,
                                             last_seen_ms: now_ms,
                                         },

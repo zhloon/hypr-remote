@@ -107,30 +107,33 @@
   </div>
 
   <!-- Remote Desktop View (Active Session) -->
+  <!-- Remote Desktop View (Active Session) -->
   <div id="session-view" class="session-container" style="display: none;">
-    <!-- Floating Header Bar -->
-    <nav class="session-nav">
+    <!-- Floating Header Bar (Auto-collapsing sleek pill) -->
+    <nav class="session-nav" id="session-nav">
       <div class="session-info">
         <span class="session-tag">正在控制</span>
         <span id="session-target-title">远程主机</span>
       </div>
 
       <div class="session-stats">
-        <span id="stat-fps">30 FPS</span>
+        <span id="stat-fps">60 FPS</span>
         <span class="stat-div">|</span>
         <span id="stat-latency">&lt; 10ms</span>
       </div>
 
       <div class="session-actions">
+        <button id="btn-toggle-scale" class="tool-btn" title="切换画面铺满模式">铺满全屏</button>
         <button id="btn-toggle-lock" class="tool-btn">锁定光标</button>
-        <button id="btn-toggle-fs" class="tool-btn">全屏</button>
+        <button id="btn-toggle-fs" class="tool-btn">全屏 (F11)</button>
         <button id="btn-disconnect" class="tool-btn btn-danger">断开</button>
       </div>
     </nav>
 
     <!-- Remote Screen Render Area -->
     <div class="screen-viewport" id="screen-viewport">
-      <img id="remote-screen-img" alt="Remote Screen" />
+      <canvas id="remote-screen-canvas"></canvas>
+      <img id="remote-screen-img" alt="Remote Screen" style="display: none;" />
     </div>
   </div>
 

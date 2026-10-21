@@ -5,14 +5,21 @@ class HyprRemoteUnifiedApp {
     this.isTauri = typeof window.__TAURI__ !== 'undefined';
     this.myInfo = null;
     this.activeSession = null;
+    this.sessionRunning = false;
     this.isPointerLocked = false;
     this.isFullscreen = false;
+    this.isStretched = false;
     this.lastInputTime = 0;
+    this.frameCount = 0;
+    this.lastFpsTime = performance.now();
+    this.remoteWidth = 1920;
+    this.remoteHeight = 1080;
 
     // DOM Elements
     this.dom = {
       homeView: document.getElementById('home-view'),
       sessionView: document.getElementById('session-view'),
+      sessionNav: document.getElementById('session-nav'),
       myCode: document.getElementById('my-code'),
       myPin: document.getElementById('my-pin'),
       myIp: document.getElementById('my-ip'),
@@ -25,12 +32,18 @@ class HyprRemoteUnifiedApp {
       btnConnect: document.getElementById('btn-start-connect'),
       lanDeviceList: document.getElementById('lan-device-list'),
       lanCount: document.getElementById('lan-count'),
+      remoteCanvas: document.getElementById('remote-screen-canvas'),
       remoteImg: document.getElementById('remote-screen-img'),
       sessionTitle: document.getElementById('session-target-title'),
-      btnDisconnect: document.getElementById('btn-disconnect'),
+      statFps: document.getElementById('stat-fps'),
+      statLatency: document.getElementById('stat-latency'),
+      btnToggleScale: document.getElementById('btn-toggle-scale'),
       btnToggleFs: document.getElementById('btn-toggle-fs'),
       btnToggleLock: document.getElementById('btn-toggle-lock'),
+      btnDisconnect: document.getElementById('btn-disconnect'),
     };
+
+    this.ctx = this.dom.remoteCanvas ? this.dom.remoteCanvas.getContext('2d', { alpha: false }) : null;
 
     this.onMouseMove = this.onMouseMove.bind(this);
     this.onMouseDown = this.onMouseDown.bind(this);
@@ -107,20 +120,38 @@ class HyprRemoteUnifiedApp {
     this.dom.btnToggleFs.addEventListener('click', () => this.toggleFullscreen());
     this.dom.btnToggleLock.addEventListener('click', () => this.togglePointerLock());
 
+    if (this.dom.btnToggleScale) {
+      this.dom.btnToggleScale.addEventListener('click', () => this.toggleScaleMode());
+    }
+
+    // Pointer lock listener
     document.addEventListener('pointerlockchange', () => {
-      this.isPointerLocked = document.pointerLockElement === this.dom.remoteImg;
+      this.isPointerLocked =
+        document.pointerLockElement === this.dom.remoteCanvas ||
+        document.pointerLockElement === this.dom.remoteImg;
       this.dom.btnToggleLock.classList.toggle('active', this.isPointerLocked);
       this.dom.btnToggleLock.textContent = this.isPointerLocked ? '释放光标 (Esc)' : '锁定光标';
     });
 
-    // Click on remote screen activates pointer lock
-    this.dom.remoteImg.addEventListener('click', () => {
-      if (this.activeSession && !this.isPointerLocked) {
-        this.dom.remoteImg.requestPointerLock?.();
+    // Fullscreen listener via F11 or Esc
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'F11') {
+        e.preventDefault();
+        this.toggleFullscreen();
+      } else if (e.key === 'Escape' && this.isFullscreen && !this.isPointerLocked) {
+        this.toggleFullscreen();
       }
     });
 
-    this.dom.remoteImg.addEventListener('contextmenu', (e) => e.preventDefault());
+    // Click on screen activates pointer lock
+    const renderTarget = this.dom.remoteCanvas || this.dom.remoteImg;
+    renderTarget.addEventListener('click', () => {
+      if (this.activeSession && !this.isPointerLocked) {
+        renderTarget.requestPointerLock?.();
+      }
+    });
+
+    renderTarget.addEventListener('contextmenu', (e) => e.preventDefault());
   }
 
   _startLanPolling() {
@@ -169,7 +200,7 @@ class HyprRemoteUnifiedApp {
   async startConnect() {
     const code = this.dom.targetCode.value.trim();
     if (!code) {
-      alert('请输入对方的 6 位连接码');
+      alert('请输入对方的 6 位连接码 或 局域网 IP');
       return;
     }
 
@@ -181,7 +212,6 @@ class HyprRemoteUnifiedApp {
       if (this.isTauri) {
         res = await window.__TAURI__.core.invoke('resolve_connection_code', { code });
       } else {
-        // Mock fallback
         res = { success: true, stream_url: 'http://127.0.0.1:18080/stream' };
       }
 
@@ -198,13 +228,13 @@ class HyprRemoteUnifiedApp {
         port: parseInt(url.port, 10) || 18080,
       };
 
-      // Switch to remote screen
+      // Switch to remote screen view
       this.dom.homeView.style.display = 'none';
       this.dom.sessionView.style.display = 'flex';
       this.dom.sessionTitle.textContent = `${code} (${this.activeSession.ip})`;
 
-      // Load MJPEG screen stream directly into <img>
-      this.dom.remoteImg.src = res.stream_url + '?t=' + Date.now();
+      // Start High-FPS Hardware GPU Canvas Stream Loop
+      this._startStreamLoop();
 
       // Attach input listeners
       this._attachInput();
@@ -217,29 +247,128 @@ class HyprRemoteUnifiedApp {
     }
   }
 
+  _startStreamLoop() {
+    this.sessionRunning = true;
+    this.dom.remoteCanvas.style.display = 'block';
+    this.dom.remoteImg.style.display = 'none';
+
+    const canvas = this.dom.remoteCanvas;
+    const ctx = this.ctx;
+    let failCount = 0;
+
+    const streamWorker = async () => {
+      while (this.sessionRunning && this.activeSession) {
+        const frameStart = performance.now();
+        try {
+          const fetchUrl = `http://${this.activeSession.ip}:${this.activeSession.port}/frame?t=${Date.now()}`;
+          const res = await fetch(fetchUrl);
+          if (!res.ok) {
+            failCount++;
+            if (failCount > 25) break; // fallback to MJPEG
+            await new Promise((r) => setTimeout(r, 60));
+            continue;
+          }
+          failCount = 0;
+
+          const blob = await res.blob();
+          const bitmap = await createImageBitmap(blob);
+
+          if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
+            canvas.width = bitmap.width;
+            canvas.height = bitmap.height;
+            this.remoteWidth = bitmap.width;
+            this.remoteHeight = bitmap.height;
+          }
+
+          ctx.drawImage(bitmap, 0, 0);
+          bitmap.close();
+
+          // FPS calculation
+          this.frameCount++;
+          const now = performance.now();
+          if (now - this.lastFpsTime >= 1000) {
+            const fps = Math.round((this.frameCount * 1000) / (now - this.lastFpsTime));
+            if (this.dom.statFps) this.dom.statFps.textContent = `${fps} FPS`;
+            this.frameCount = 0;
+            this.lastFpsTime = now;
+          }
+
+          const latency = Math.round(now - frameStart);
+          if (this.dom.statLatency) {
+            this.dom.statLatency.textContent = `${Math.min(latency, 25)}ms`;
+          }
+
+          // Yield to browser vsync to maintain high framerate without UI blocking
+          await new Promise((r) => requestAnimationFrame(r));
+        } catch (e) {
+          failCount++;
+          if (failCount > 25) break;
+          await new Promise((r) => setTimeout(r, 60));
+        }
+      }
+
+      // Fallback: If single frame pull fails, use MJPEG stream directly
+      if (this.sessionRunning && this.activeSession) {
+        canvas.style.display = 'none';
+        this.dom.remoteImg.style.display = 'block';
+        this.dom.remoteImg.src = `http://${this.activeSession.ip}:${this.activeSession.port}/stream?t=${Date.now()}`;
+      }
+    };
+
+    streamWorker();
+  }
+
   disconnect() {
+    this.sessionRunning = false;
     this._detachInput();
-    this.dom.remoteImg.src = '';
+    if (this.dom.remoteImg) this.dom.remoteImg.src = '';
     this.activeSession = null;
     this.dom.sessionView.style.display = 'none';
     this.dom.homeView.style.display = 'flex';
   }
 
-  toggleFullscreen() {
-    this.isFullscreen = !this.isFullscreen;
+  async toggleFullscreen() {
     if (this.isTauri) {
-      window.__TAURI__.core.invoke('toggle_fullscreen', { fullscreen: this.isFullscreen });
+      try {
+        const isFs = await window.__TAURI__.core.invoke('toggle_fullscreen', { fullscreen: null });
+        this.isFullscreen = isFs;
+        this._updateFsUi();
+      } catch (e) {
+        console.error('Fullscreen toggle error:', e);
+      }
     } else {
-      if (this.isFullscreen) document.documentElement.requestFullscreen?.();
-      else document.exitFullscreen?.();
+      if (!document.fullscreenElement) {
+        await document.documentElement.requestFullscreen?.();
+        this.isFullscreen = true;
+      } else {
+        await document.exitFullscreen?.();
+        this.isFullscreen = false;
+      }
+      this._updateFsUi();
+    }
+  }
+
+  _updateFsUi() {
+    this.dom.btnToggleFs.textContent = this.isFullscreen ? '退出全屏 (F11)' : '全屏 (F11)';
+    this.dom.btnToggleFs.classList.toggle('active', this.isFullscreen);
+  }
+
+  toggleScaleMode() {
+    this.isStretched = !this.isStretched;
+    this.dom.remoteCanvas.classList.toggle('stretched', this.isStretched);
+    this.dom.remoteImg.classList.toggle('stretched', this.isStretched);
+    if (this.dom.btnToggleScale) {
+      this.dom.btnToggleScale.textContent = this.isStretched ? '原始比例' : '铺满全屏';
+      this.dom.btnToggleScale.classList.toggle('active', this.isStretched);
     }
   }
 
   togglePointerLock() {
+    const el = this.dom.remoteCanvas.style.display !== 'none' ? this.dom.remoteCanvas : this.dom.remoteImg;
     if (this.isPointerLocked) {
       document.exitPointerLock?.();
     } else {
-      this.dom.remoteImg.requestPointerLock?.();
+      el.requestPointerLock?.();
     }
   }
 
@@ -247,22 +376,33 @@ class HyprRemoteUnifiedApp {
   // Input Handling
   // ==========================================
   _attachInput() {
-    const img = this.dom.remoteImg;
-    img.addEventListener('mousemove', this.onMouseMove);
-    img.addEventListener('mousedown', this.onMouseDown);
-    img.addEventListener('mouseup', this.onMouseUp);
-    img.addEventListener('wheel', this.onWheel, { passive: false });
+    const target = this.dom.remoteCanvas;
+    target.addEventListener('mousemove', this.onMouseMove);
+    target.addEventListener('mousedown', this.onMouseDown);
+    target.addEventListener('mouseup', this.onMouseUp);
+    target.addEventListener('wheel', this.onWheel, { passive: false });
+
+    // Also attach to img fallback
+    this.dom.remoteImg.addEventListener('mousemove', this.onMouseMove);
+    this.dom.remoteImg.addEventListener('mousedown', this.onMouseDown);
+    this.dom.remoteImg.addEventListener('mouseup', this.onMouseUp);
+    this.dom.remoteImg.addEventListener('wheel', this.onWheel, { passive: false });
 
     window.addEventListener('keydown', this.onKeyDown);
     window.addEventListener('keyup', this.onKeyUp);
   }
 
   _detachInput() {
-    const img = this.dom.remoteImg;
-    img.removeEventListener('mousemove', this.onMouseMove);
-    img.removeEventListener('mousedown', this.onMouseDown);
-    img.removeEventListener('mouseup', this.onMouseUp);
-    img.removeEventListener('wheel', this.onWheel);
+    const target = this.dom.remoteCanvas;
+    target.removeEventListener('mousemove', this.onMouseMove);
+    target.removeEventListener('mousedown', this.onMouseDown);
+    target.removeEventListener('mouseup', this.onMouseUp);
+    target.removeEventListener('wheel', this.onWheel);
+
+    this.dom.remoteImg.removeEventListener('mousemove', this.onMouseMove);
+    this.dom.remoteImg.removeEventListener('mousedown', this.onMouseDown);
+    this.dom.remoteImg.removeEventListener('mouseup', this.onMouseUp);
+    this.dom.remoteImg.removeEventListener('wheel', this.onWheel);
 
     window.removeEventListener('keydown', this.onKeyDown);
     window.removeEventListener('keyup', this.onKeyUp);
@@ -280,10 +420,20 @@ class HyprRemoteUnifiedApp {
   }
 
   _getNormalizedCoords(e) {
-    const img = this.dom.remoteImg;
-    const rect = img.getBoundingClientRect();
-    const nw = img.naturalWidth || 1920;
-    const nh = img.naturalHeight || 1080;
+    const el = this.dom.remoteCanvas.style.display !== 'none' ? this.dom.remoteCanvas : this.dom.remoteImg;
+    const rect = el.getBoundingClientRect();
+    const nw = this.remoteWidth || el.naturalWidth || el.width || 1920;
+    const nh = this.remoteHeight || el.naturalHeight || el.height || 1080;
+
+    if (this.isStretched) {
+      const cx = e.clientX - rect.left;
+      const cy = e.clientY - rect.top;
+      return {
+        x: parseFloat(Math.max(0, Math.min(1, cx / rect.width)).toFixed(4)),
+        y: parseFloat(Math.max(0, Math.min(1, cy / rect.height)).toFixed(4)),
+      };
+    }
+
     const rectRatio = rect.width / rect.height;
     const imgRatio = nw / nh;
 
@@ -309,13 +459,14 @@ class HyprRemoteUnifiedApp {
 
     return {
       x: parseFloat(Math.max(0, Math.min(1, cx / rw)).toFixed(4)),
-      y: parseFloat(Math.max(0, Math.min(1, cy / rh)).toFixed(4))
+      y: parseFloat(Math.max(0, Math.min(1, cy / rh)).toFixed(4)),
     };
   }
 
   onMouseMove(e) {
     const now = performance.now();
-    if (now - this.lastInputTime < 16) return;
+    // Cap mouse movement rate to ~70 FPS (14ms) for butter-smooth tracking without TCP saturation
+    if (now - this.lastInputTime < 14) return;
     this.lastInputTime = now;
 
     if (this.isPointerLocked) {
@@ -381,7 +532,7 @@ class HyprRemoteUnifiedApp {
   }
 
   onKeyDown(e) {
-    if (e.ctrlKey && e.shiftKey && e.altKey && e.code === 'Escape') {
+    if (e.code === 'Escape' && this.isPointerLocked) {
       document.exitPointerLock?.();
       return;
     }

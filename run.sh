@@ -47,7 +47,10 @@ if ! command -v cargo >/dev/null 2>&1; then
 fi
 
 # 4. 启动客户端
-echo "[3/3] 正在编译并启动 HyprRemote..."
+echo "[3/3] 正在检查端口并启动 HyprRemote..."
+fuser -k 18080/tcp 2>/dev/null || true
+pkill -f hypr-remote-client 2>/dev/null || true
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR/client/src-tauri"
 

@@ -12,9 +12,13 @@ use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, State, WindowEvent};
 use types::{ConnectResult, ControlMessage, LanDevice, MyDeviceInfo};
 
+use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::Mutex;
+
 struct AppState {
     discovery: Arc<DiscoveryManager>,
     _server: Arc<EmbeddedHostServer>,
+    input_channel: Arc<Mutex<Option<(String, u16, UnboundedSender<ControlMessage>)>>>,
 }
 
 #[tauri::command]
@@ -34,32 +38,16 @@ async fn resolve_connection_code(
 ) -> Result<ConnectResult, String> {
     let clean = code.trim().replace(" ", "");
 
-    // 1. Check if connecting to self (loopback test)
-    let my_info = state.discovery.get_my_info();
-    if clean == my_info.code.replace(" ", "") {
-        return Ok(ConnectResult {
-            success: true,
-            error: None,
-            stream_url: Some(format!("http://127.0.0.1:{}/stream", my_info.port)),
-        });
+    // 1. Direct IP entry: e.g. "192.168.1.100" or "http://192.168.1.100:18080"
+    let mut clean_target = code.trim().replace("http://", "").replace("https://", "");
+    if let Some(pos) = clean_target.find('/') {
+        clean_target = clean_target[..pos].to_string();
     }
-
-    // 2. Query LAN discovered devices
-    if let Some((ip, port)) = state.discovery.resolve_code(&code) {
-        return Ok(ConnectResult {
-            success: true,
-            error: None,
-            stream_url: Some(format!("http://{}:{}/stream", ip, port)),
-        });
-    }
-
-    // 3. Direct IP (e.g. "192.168.1.100" or "192.168.1.100:18080")
-    let trimmed = code.trim();
-    if trimmed.contains('.') {
-        let target = if trimmed.contains(':') {
-            trimmed.to_string()
+    if clean_target.contains('.') {
+        let target = if clean_target.contains(':') {
+            clean_target
         } else {
-            format!("{}:18080", trimmed)
+            format!("{}:18080", clean_target)
         };
         return Ok(ConnectResult {
             success: true,
@@ -68,49 +56,99 @@ async fn resolve_connection_code(
         });
     }
 
+    // 2. Prevent accidental self-connection
+    let my_info = state.discovery.get_my_info();
+    if clean == my_info.code.replace(" ", "") {
+        return Ok(ConnectResult {
+            success: false,
+            error: Some("⚠️ 您输入的是【本机连接码】！\n若要控制其他设备，请输入对方屏幕上显示的连接码或对方的局域网 IP。".to_string()),
+            stream_url: None,
+        });
+    }
+
+    // 3. Query LAN discovered devices
+    if let Some((ip, port)) = state.discovery.resolve_code(&code) {
+        return Ok(ConnectResult {
+            success: true,
+            error: None,
+            stream_url: Some(format!("http://{}:{}/stream", ip, port)),
+        });
+    }
+
     Ok(ConnectResult {
         success: false,
-        error: Some("未在局域网内找到该连接码对应的设备，请确认对方已打开 HyprRemote。".to_string()),
+        error: Some("未在局域网内扫描到该连接码。\n\n💡 解决方案：请直接在输入框中输入对方屏幕左侧显示的【局域网 IP】(例如 192.168.x.x) 发起直连！".to_string()),
         stream_url: None,
     })
 }
 
 #[tauri::command]
-fn toggle_fullscreen(app: AppHandle, fullscreen: bool) -> Result<(), String> {
+fn toggle_fullscreen(app: AppHandle, fullscreen: Option<bool>) -> Result<bool, String> {
     if let Some(window) = app.get_webview_window("main") {
-        window.set_fullscreen(fullscreen).map_err(|e| e.to_string())?;
+        let target = match fullscreen {
+            Some(f) => f,
+            None => !window.is_fullscreen().unwrap_or(false),
+        };
+        window.set_fullscreen(target).map_err(|e| e.to_string())?;
+        return Ok(target);
     }
-    Ok(())
+    Ok(false)
 }
 
 #[tauri::command]
 async fn send_input_to_remote(
+    state: State<'_, AppState>,
     target_ip: String,
     target_port: u16,
     msg: ControlMessage,
 ) -> Result<(), String> {
-    let url = format!("http://{}:{}/input", target_ip, target_port);
-    let body = serde_json::to_string(&msg).map_err(|e| e.to_string())?;
+    let mut lock = state.input_channel.lock().await;
+
+    // 1. If persistent channel is already active for this target, send with 0 latency
+    if let Some((ip, port, tx)) = &*lock {
+        if *ip == target_ip && *port == target_port && !tx.is_closed() {
+            let _ = tx.send(msg);
+            return Ok(());
+        }
+    }
+
+    // 2. Establish persistent zero-handshake TCP stream for input events
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ControlMessage>();
+    let tip = target_ip.clone();
+    let tport = target_port;
+    let input_holder = state.input_channel.clone();
 
     tauri::async_runtime::spawn(async move {
-        if let Ok(addr) = format!("{}:{}", target_ip, target_port).parse::<std::net::SocketAddr>() {
+        let addr_str = format!("{}:{}", tip, tport);
+        if let Ok(addr) = addr_str.parse::<std::net::SocketAddr>() {
             if let Ok(mut stream) = tokio::net::TcpStream::connect(addr).await {
                 let _ = stream.set_nodelay(true);
-                let req = format!(
-                    "POST /input HTTP/1.1\r\n\
+                let init_req = format!(
+                    "POST /input_stream HTTP/1.1\r\n\
                     Host: {}\r\n\
-                    Content-Type: application/json\r\n\
-                    Content-Length: {}\r\n\
-                    Connection: close\r\n\r\n{}",
-                    url,
-                    body.len(),
-                    body
+                    Content-Type: text/plain\r\n\
+                    Connection: keep-alive\r\n\r\n",
+                    addr_str
                 );
-                let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, req.as_bytes()).await;
+                use tokio::io::AsyncWriteExt;
+                if stream.write_all(init_req.as_bytes()).await.is_ok() {
+                    while let Some(m) = rx.recv().await {
+                        if let Ok(serialized) = serde_json::to_string(&m) {
+                            let line = format!("{}\n", serialized);
+                            if stream.write_all(line.as_bytes()).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
             }
         }
+        let mut l = input_holder.lock().await;
+        *l = None;
     });
 
+    let _ = tx.send(msg);
+    *lock = Some((target_ip, target_port, tx));
     Ok(())
 }
 
@@ -126,6 +164,7 @@ pub fn run() {
     let state = AppState {
         discovery,
         _server: server,
+        input_channel: Arc::new(Mutex::new(None)),
     };
 
     tauri::Builder::default()
