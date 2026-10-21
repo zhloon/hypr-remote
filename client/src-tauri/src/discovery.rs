@@ -54,14 +54,7 @@ pub fn get_active_interfaces() -> Vec<NetInterface> {
                         && !ip_str.starts_with("127.");
 
                     if is_valid_lan {
-                        let mut broadcast_str = None;
-                        // On macOS/BSD ifa_dstaddr holds the broadcast address when IFF_BROADCAST is set
-                        if !ifa.ifa_dstaddr.is_null() {
-                            let sin_broad = &*(ifa.ifa_dstaddr as *const libc::sockaddr_in);
-                            let broad_ip = std::net::Ipv4Addr::from(u32::from_be(sin_broad.sin_addr.s_addr));
-                            broadcast_str = Some(broad_ip.to_string());
-                        }
-
+                        let broadcast_str = ip_str.rfind('.').map(|idx| format!("{}.255", &ip_str[..idx]));
                         result.push(NetInterface {
                             name,
                             ip: ip_str,
@@ -125,56 +118,17 @@ pub fn get_local_ip() -> String {
 
 
 fn create_udp_socket(port: u16) -> Option<std::net::UdpSocket> {
-    #[cfg(unix)]
-    unsafe {
-        use std::os::unix::io::FromRawFd;
-        let fd = libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0);
-        if fd >= 0 {
-            let opt: libc::c_int = 1;
-            libc::setsockopt(
-                fd,
-                libc::SOL_SOCKET,
-                libc::SO_REUSEADDR,
-                &opt as *const _ as *const libc::c_void,
-                std::mem::size_of_val(&opt) as u32,
-            );
-            #[cfg(not(target_os = "windows"))]
-            libc::setsockopt(
-                fd,
-                libc::SOL_SOCKET,
-                libc::SO_REUSEPORT,
-                &opt as *const _ as *const libc::c_void,
-                std::mem::size_of_val(&opt) as u32,
-            );
+    use socket2::{Domain, Protocol, Socket, Type};
+    let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).ok()?;
+    let _ = socket.set_reuse_address(true);
+    #[cfg(all(unix, not(target_os = "solaris")))]
+    let _ = socket.set_reuse_port(true);
+    let _ = socket.set_broadcast(true);
+    let _ = socket.set_nonblocking(true);
 
-            let mut addr: libc::sockaddr_in = std::mem::zeroed();
-            addr.sin_family = libc::AF_INET as libc::sa_family_t;
-            addr.sin_port = port.to_be();
-            addr.sin_addr.s_addr = libc::INADDR_ANY;
-
-            if libc::bind(
-                fd,
-                &addr as *const _ as *const libc::sockaddr,
-                std::mem::size_of_val(&addr) as u32,
-            ) == 0
-            {
-                let sock = std::net::UdpSocket::from_raw_fd(fd);
-                let _ = sock.set_broadcast(true);
-                let _ = sock.set_nonblocking(true);
-                return Some(sock);
-            } else {
-                libc::close(fd);
-            }
-        }
-    }
-
-    // Fallback standard bind
-    if let Ok(sock) = std::net::UdpSocket::bind(format!("0.0.0.0:{}", port)) {
-        let _ = sock.set_broadcast(true);
-        let _ = sock.set_nonblocking(true);
-        return Some(sock);
-    }
-    None
+    let addr: SocketAddr = format!("0.0.0.0:{}", port).parse().ok()?;
+    socket.bind(&addr.into()).ok()?;
+    Some(socket.into())
 }
 
 fn get_broadcast_targets(local_ip: &str) -> Vec<SocketAddr> {
