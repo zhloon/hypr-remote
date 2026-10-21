@@ -514,14 +514,6 @@ mod linux_impl {
             }
         }
 
-        // 3. Fallback: Command hyprctl dispatch movecursor
-        if let Ok(status) = std::process::Command::new("hyprctl")
-            .args(["dispatch", "movecursor", &format!("{},{}", px, py)])
-            .status()
-        {
-            return status.success();
-        }
-
         false
     }
 
@@ -545,11 +537,9 @@ mod linux_impl {
         let px = ox + (x.clamp(0.0, 1.0) * screen_w).round() as i32;
         let py = oy + (y.clamp(0.0, 1.0) * screen_h).round() as i32;
 
-        // 1. Move visible compositor cursor directly (1:1 pixel overlap!)
-        hyprland_move_cursor(px, py);
-
-        // 2. Synchronize uinput device for raw evdev applications
-        {
+        // 1. Move visible compositor cursor directly (1:1 pixel overlap via IPC socket)
+        if !hyprland_move_cursor(px, py) {
+            // 2. Fallback to /dev/uinput virtual absolute device if Hyprland IPC is not available
             let uinput_guard = get_uinput();
             if let Some(ref dev) = *uinput_guard {
                 let abs_x = (x.clamp(0.0, 1.0) * 65535.0).round() as i32;

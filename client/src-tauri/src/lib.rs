@@ -12,7 +12,7 @@ use tauri::{AppHandle, Manager, State};
 use types::{ConnectResult, ControlMessage, LanDevice, MyDeviceInfo};
 
 use tokio::sync::mpsc::UnboundedSender;
-use tokio::sync::Mutex;
+use std::sync::Mutex;
 
 struct AppState {
     discovery: Arc<DiscoveryManager>,
@@ -95,13 +95,13 @@ fn toggle_fullscreen(app: AppHandle, fullscreen: Option<bool>) -> Result<bool, S
 }
 
 #[tauri::command]
-async fn send_input_to_remote(
+fn send_input_to_remote(
     state: State<'_, AppState>,
     target_ip: String,
     target_port: u16,
     msg: ControlMessage,
 ) -> Result<(), String> {
-    let mut lock = state.input_channel.lock().await;
+    let mut lock = state.input_channel.lock().map_err(|e| e.to_string())?;
 
     // 1. If persistent channel is already active for this target, send with 0 latency
     if let Some((ip, port, tx)) = &*lock {
@@ -149,8 +149,9 @@ async fn send_input_to_remote(
                 }
             }
         }
-        let mut l = input_holder.lock().await;
-        *l = None;
+        if let Ok(mut l) = input_holder.lock() {
+            *l = None;
+        }
     });
 
     let _ = tx.send(msg);

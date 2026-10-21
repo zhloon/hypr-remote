@@ -523,7 +523,7 @@ body {
 #remote-screen-img {
   max-width: 100vw;
   max-height: 100vh;
-  cursor: crosshair;
+  cursor: default;
   image-rendering: -webkit-optimize-contrast;
   image-rendering: crisp-edges;
   transform: translateZ(0);

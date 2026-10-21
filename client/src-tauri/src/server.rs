@@ -457,9 +457,19 @@ impl EmbeddedHostServer {
                 return;
             }
 
-            // Pipe remaining encoder stdout directly into client TCP socket with high-throughput 64KB buffer
-            let mut reader = tokio::io::BufReader::with_capacity(65536, stdout);
-            let _ = tokio::io::copy(&mut reader, &mut stream).await;
+            // Pipe remaining encoder stdout directly into client TCP socket with zero-overhead 64KB buffer
+            let mut stream_buf = vec![0u8; 65536];
+            loop {
+                match stdout.read(&mut stream_buf).await {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if stream.write_all(&stream_buf[..n]).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
 
             let _ = child.kill().await;
             println!("[H264] Client disconnected, stopped H.264 recorder");

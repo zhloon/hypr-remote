@@ -151,14 +151,9 @@ class HyprRemoteUnifiedApp {
       this.dom.btnSyncClipboard.addEventListener('click', () => this.syncClipboard(true));
     }
 
-    // Click on screen activates pointer lock
+    // Prevent contextmenu on remote display to allow right-click passthrough
     [this.dom.remoteVideo, this.dom.remoteCanvas, this.dom.remoteImg].forEach((target) => {
       if (!target) return;
-      target.addEventListener('click', () => {
-        if (this.activeSession && !this.isPointerLocked) {
-          target.requestPointerLock?.();
-        }
-      });
       target.addEventListener('contextmenu', (e) => e.preventDefault());
     });
 
@@ -437,6 +432,7 @@ class HyprRemoteUnifiedApp {
       throw new Error(`H264 stream HTTP ${res.status}`);
     }
 
+    this.isH264Active = true;
     const reader = res.body.getReader();
     const queue = [];
 
@@ -478,6 +474,11 @@ class HyprRemoteUnifiedApp {
         } catch (_) {}
       }
 
+      // Guarantee immediate playback the instant the initial fragment is ready
+      if (video.paused && this.sessionRunning) {
+        video.play().catch(() => {});
+      }
+
       flushQueue();
     });
 
@@ -491,7 +492,7 @@ class HyprRemoteUnifiedApp {
     video.onloadedmetadata = handleVideoDimensions;
     video.onresize = handleVideoDimensions;
     video.oncanplay = () => {
-      if (video.paused && this.sessionRunning && this.isH264Active) {
+      if (video.paused && this.sessionRunning) {
         video.play().catch(() => {});
       }
     };
@@ -560,7 +561,7 @@ class HyprRemoteUnifiedApp {
       clearTimeout(h264Watchdog);
       if (video.buffered.length > 0) {
         const liveEnd = video.buffered.end(video.buffered.length - 1);
-        video.currentTime = Math.max(0, liveEnd - 0.05);
+        video.currentTime = Math.max(0, liveEnd - 0.03);
       }
       video.style.display = 'block';
       if (canvas) canvas.style.display = 'none';
@@ -1037,32 +1038,53 @@ class HyprRemoteUnifiedApp {
     const coords = this._getNormalizedCoords(e);
     if (!coords) return;
 
-    this._pendingCoords = coords;
-    if (!this._moveRaf) {
-      this._moveRaf = requestAnimationFrame(() => {
-        this._moveRaf = null;
-        if (this._pendingCoords) {
-          this._sendInput({
-            type: 'MouseMove',
-            x: this._pendingCoords.x,
-            y: this._pendingCoords.y,
-            dx: 0,
-            dy: 0,
-            is_rel: false,
-          });
-          this._pendingCoords = null;
-        }
+    const now = performance.now();
+    // High-responsiveness leading-edge dispatch at up to 120Hz (~8ms) without waiting for rAF VSync:
+    if (!this._lastMoveTime || now - this._lastMoveTime >= 8) {
+      this._lastMoveTime = now;
+      if (this._pendingMoveTimer) {
+        clearTimeout(this._pendingMoveTimer);
+        this._pendingMoveTimer = null;
+      }
+      this._sendInput({
+        type: 'MouseMove',
+        x: coords.x,
+        y: coords.y,
+        dx: 0,
+        dy: 0,
+        is_rel: false,
       });
+    } else {
+      // Trailing edge: guarantee the final resting position is dispatched
+      this._pendingCoords = coords;
+      if (!this._pendingMoveTimer) {
+        this._pendingMoveTimer = setTimeout(() => {
+          this._pendingMoveTimer = null;
+          if (this._pendingCoords) {
+            this._lastMoveTime = performance.now();
+            this._sendInput({
+              type: 'MouseMove',
+              x: this._pendingCoords.x,
+              y: this._pendingCoords.y,
+              dx: 0,
+              dy: 0,
+              is_rel: false,
+            });
+            this._pendingCoords = null;
+          }
+        }, 8);
+      }
     }
   }
 
   onMouseDown(e) {
-    if (this._moveRaf) {
-      cancelAnimationFrame(this._moveRaf);
-      this._moveRaf = null;
+    if (this._pendingMoveTimer) {
+      clearTimeout(this._pendingMoveTimer);
+      this._pendingMoveTimer = null;
     }
     const coords = this._getNormalizedCoords(e);
     if (coords) {
+      this._lastMoveTime = performance.now();
       this._sendInput({
         type: 'MouseMove',
         x: coords.x,
@@ -1080,12 +1102,13 @@ class HyprRemoteUnifiedApp {
   }
 
   onMouseUp(e) {
-    if (this._moveRaf) {
-      cancelAnimationFrame(this._moveRaf);
-      this._moveRaf = null;
+    if (this._pendingMoveTimer) {
+      clearTimeout(this._pendingMoveTimer);
+      this._pendingMoveTimer = null;
     }
     const coords = this._getNormalizedCoords(e);
     if (coords) {
+      this._lastMoveTime = performance.now();
       this._sendInput({
         type: 'MouseMove',
         x: coords.x,
