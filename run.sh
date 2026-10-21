@@ -70,6 +70,7 @@ echo "[3/3] 正在检查端口并启动 HyprRemote..."
 fuser -k 18080/tcp 2>/dev/null || true
 fuser -k 8082/udp 2>/dev/null || true
 pkill -f hypr-remote-client 2>/dev/null || true
+killall -9 wf-recorder 2>/dev/null || pkill -9 -f wf-recorder 2>/dev/null || true
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR/client/src-tauri"

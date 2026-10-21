@@ -372,13 +372,27 @@ impl EmbeddedHostServer {
         // 6. Ultra-Low-Latency Hardware H.264 Video Stream: GET /h264_stream
         else if method == "GET" && path.starts_with("/h264_stream") {
             H264_STREAM_ACTIVE.store(true, std::sync::atomic::Ordering::Relaxed);
-            struct H264ActiveGuard;
+            struct H264ActiveGuard {
+                child_pid: std::sync::Arc<std::sync::atomic::AtomicU32>,
+            }
             impl Drop for H264ActiveGuard {
                 fn drop(&mut self) {
                     H264_STREAM_ACTIVE.store(false, std::sync::atomic::Ordering::Relaxed);
+                    let pid = self.child_pid.load(std::sync::atomic::Ordering::Relaxed);
+                    #[cfg(unix)]
+                    if pid > 0 {
+                        unsafe {
+                            libc::kill(-(pid as i32), libc::SIGKILL);
+                            libc::kill(pid as i32, libc::SIGKILL);
+                        }
+                    }
+                    let _ = std::process::Command::new("pkill").args(["-9", "-f", "wf-recorder.*mpegts"]).status();
+                    let _ = std::process::Command::new("killall").args(["-9", "wf-recorder"]).status();
+                    println!("[H264] Cleaned up recorder process (PID: {}) and all children", pid);
                 }
             }
-            let _h264_guard = H264ActiveGuard;
+            let child_pid_arc = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+            let _h264_guard = H264ActiveGuard { child_pid: child_pid_arc.clone() };
 
             let mut child = match crate::capture::spawn_h264_recorder_process() {
                 Ok(c) => c,
@@ -393,6 +407,10 @@ impl EmbeddedHostServer {
                     return;
                 }
             };
+
+            if let Some(pid) = child.id() {
+                child_pid_arc.store(pid, std::sync::atomic::Ordering::Relaxed);
+            }
 
             let mut stdout = match child.stdout.take() {
                 Some(s) => s,

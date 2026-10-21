@@ -183,8 +183,9 @@ pub fn capture_desktop_frame() -> (Vec<u8>, &'static str) {
 
 #[cfg(target_os = "linux")]
 pub fn spawn_h264_recorder_process() -> Result<tokio::process::Child, std::io::Error> {
-    // Kill any lingering recorder instance to ensure clean port/device access
-    let _ = std::process::Command::new("pkill").arg("-x").arg("wf-recorder").status();
+    // Kill any lingering recorder instance to ensure clean port/device access and avoid CPU leaks
+    let _ = std::process::Command::new("pkill").args(["-9", "-f", "wf-recorder.*mpegts"]).status();
+    let _ = std::process::Command::new("killall").args(["-9", "wf-recorder"]).status();
 
     let mon_name = {
         let active = ACTIVE_MONITOR_NAME.lock().ok().and_then(|g| g.clone());
@@ -212,11 +213,12 @@ pub fn spawn_h264_recorder_process() -> Result<tokio::process::Child, std::io::E
         println!("[H264/GPU] Detected VA-API GPU (/dev/dri/renderD129) -> Using h264_vaapi (Hardware Acceleration, 60fps, Zero-Copy)");
         ("-c h264_vaapi -d /dev/dri/renderD129 -b 0 -p g=15", true)
     } else {
-        println!("[H264/CPU] No dedicated hardware encoder node -> Using libx264 ultrafast (60fps)");
-        ("-c libx264 -b 0 -p preset=ultrafast -p tune=zerolatency -p g=15", false)
+        println!("[H264/CPU] No dedicated hardware encoder node -> Using libx264 ultrafast (60fps, capped 2 threads)");
+        ("-c libx264 -b 0 -p preset=ultrafast -p tune=zerolatency -p g=15 -p threads=2", false)
     };
 
-    let cpu_fallback = "-c libx264 -b 0 -p preset=ultrafast -p tune=zerolatency -p g=15";
+    // If CPU fallback is needed, cap threads=2 to prevent 300%+ CPU throttling / thermal runaway!
+    let cpu_fallback = "-c libx264 -b 0 -p preset=ultrafast -p tune=zerolatency -p g=15 -p threads=2";
 
     let primary_wf = format!("wf-recorder -D -y {} -m mpegts -r 60 {} -f /dev/stdout", out_flag, hw_args);
     let cpu_wf = format!("wf-recorder -D -y {} -m mpegts -r 60 {} -f /dev/stdout", out_flag, cpu_fallback);
@@ -252,6 +254,8 @@ pub fn spawn_h264_recorder_process() -> Result<tokio::process::Child, std::io::E
     cmd.arg("-c").arg(pipeline);
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::inherit());
+    #[cfg(unix)]
+    cmd.process_group(0);
 
     cmd.spawn()
 }
