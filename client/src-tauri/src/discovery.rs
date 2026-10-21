@@ -273,7 +273,7 @@ impl DiscoveryManager {
     pub fn get_devices(&self) -> Vec<LanDevice> {
         let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
         let mut map = self.devices.lock().unwrap();
-        map.retain(|_, d| now_ms - d.last_seen_ms < 6000);
+        map.retain(|_, d| now_ms - d.last_seen_ms < 15000);
         map.values().cloned().collect()
     }
 
@@ -360,66 +360,164 @@ impl DiscoveryManager {
             let mut buf = [0u8; 1024];
             let clean_my_code = this.my_info.code.replace(" ", "");
 
-            loop {
-                if let Ok((len, src)) = socket.recv_from(&mut buf).await {
-                    let sender_ip = src.ip();
-                    // STRICT RULE: Never record loopback IP as a LAN device!
-                    if sender_ip.is_loopback() {
-                        continue;
-                    }
+            let s_listen = socket.clone();
+            let my_info_listen = this.my_info.clone();
+            let devices_listen = this.devices.clone();
 
-                    if let Ok(text) = std::str::from_utf8(&buf[..len]) {
-                        if text.starts_with("HYPR_BEACON:") {
-                            let parts: Vec<&str> = text.split(':').collect();
-                            if parts.len() >= 6 {
-                                let code = parts[1];
-                                if code != clean_my_code {
-                                    let port = parts[3].parse::<u16>().unwrap_or(18080);
-                                    let hostname = parts[4].to_string();
-                                    let os = parts[5].to_string();
-                                    let real_ip = sender_ip.to_string();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    if let Ok((len, src)) = s_listen.recv_from(&mut buf).await {
+                        let sender_ip = src.ip();
+                        if sender_ip.is_loopback() {
+                            continue;
+                        }
 
-                                    let formatted_code = if code.len() == 6 {
-                                        format!("{} {}", &code[..3], &code[3..])
-                                    } else {
-                                        code.to_string()
-                                    };
+                        if let Ok(text) = std::str::from_utf8(&buf[..len]) {
+                            if text.starts_with("HYPR_BEACON:") {
+                                let parts: Vec<&str> = text.split(':').collect();
+                                if parts.len() >= 6 {
+                                    let code = parts[1];
+                                    if code != clean_my_code {
+                                        let port = parts[3].parse::<u16>().unwrap_or(18080);
+                                        let hostname = parts[4].to_string();
+                                        let os = parts[5].to_string();
+                                        let real_ip = sender_ip.to_string();
 
-                                    let now_ms = SystemTime::now()
-                                        .duration_since(UNIX_EPOCH)
-                                        .unwrap()
-                                        .as_millis() as u64;
+                                        let formatted_code = if code.len() == 6 {
+                                            format!("{} {}", &code[..3], &code[3..])
+                                        } else {
+                                            code.to_string()
+                                        };
 
-                                    {
-                                        let mut map = this.devices.lock().unwrap();
-                                        map.insert(
-                                            code.to_string(),
-                                            LanDevice {
-                                                code: formatted_code,
-                                                hostname,
-                                                os,
-                                                ip: real_ip,
-                                                port,
-                                                last_seen_ms: now_ms,
-                                            },
+                                        let now_ms = SystemTime::now()
+                                            .duration_since(UNIX_EPOCH)
+                                            .unwrap()
+                                            .as_millis() as u64;
+
+                                        {
+                                            let mut map = devices_listen.lock().unwrap();
+                                            map.insert(
+                                                code.to_string(),
+                                                LanDevice {
+                                                    code: formatted_code,
+                                                    hostname,
+                                                    os,
+                                                    ip: real_ip,
+                                                    port,
+                                                    last_seen_ms: now_ms,
+                                                },
+                                            );
+                                        }
+
+                                        // Send immediate unicast reply
+                                        let reply_msg = format!(
+                                            "HYPR_BEACON:{}:{}:{}:{}:{}",
+                                            clean_my_code,
+                                            my_info_listen.pin,
+                                            my_info_listen.port,
+                                            my_info_listen.hostname,
+                                            my_info_listen.os
                                         );
+                                        let reply_target = SocketAddr::new(sender_ip, 8082);
+                                        let _ = s_listen.send_to(reply_msg.as_bytes(), reply_target).await;
                                     }
-
-                                    // Send immediate unicast reply so peer discovers us instantly
-                                    let reply_msg = format!(
-                                        "HYPR_BEACON:{}:{}:{}:{}:{}",
-                                        clean_my_code, this.my_info.pin, this.my_info.port, this.my_info.hostname, this.my_info.os
-                                    );
-                                    let reply_target = SocketAddr::new(sender_ip, 8082);
-                                    let _ = socket.send_to(reply_msg.as_bytes(), reply_target).await;
                                 }
                             }
                         }
                     }
                 }
-            }
+            });
+
+            // Task 4: Zero-Failure TCP/HTTP LAN Scanner on Port 18080 (Bypasses all router broadcast & UDP filtering!)
+            let my_info_http = this.my_info.clone();
+            let devices_http = this.devices.clone();
+            tauri::async_runtime::spawn(async move {
+                let clean_code = my_info_http.code.replace(" ", "");
+                loop {
+                    let cur_ip = get_local_ip();
+                    if let Some(idx) = cur_ip.rfind('.') {
+                        let prefix = cur_ip[..=idx].to_string(); // e.g. "192.168.5."
+                        let my_last_octet = cur_ip[idx + 1..].parse::<u8>().unwrap_or(0);
+
+                        for host in 1..=254 {
+                            if host == my_last_octet {
+                                continue;
+                            }
+                            let target_ip = format!("{}{}", prefix, host);
+                            let target_addr_str = format!("{}:18080", target_ip);
+                            let clean_my = clean_code.clone();
+                            let devs = devices_http.clone();
+
+                            tauri::async_runtime::spawn(async move {
+                                if let Ok(addr) = target_addr_str.parse::<SocketAddr>() {
+                                    if let Ok(Ok(mut stream)) = tokio::time::timeout(
+                                        Duration::from_millis(350),
+                                        tokio::net::TcpStream::connect(addr),
+                                    )
+                                    .await
+                                    {
+                                        let _ = stream.set_nodelay(true);
+                                        let req = format!(
+                                            "GET /info HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+                                            target_addr_str
+                                        );
+                                        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                                        if stream.write_all(req.as_bytes()).await.is_ok() {
+                                            let mut buf = vec![0u8; 1024];
+                                            if let Ok(Ok(n)) = tokio::time::timeout(
+                                                Duration::from_millis(300),
+                                                stream.read(&mut buf),
+                                            )
+                                            .await
+                                            {
+                                                if n > 0 {
+                                                    let text = String::from_utf8_lossy(&buf[..n]);
+                                                    if let Some(pos) = text.find("\r\n\r\n") {
+                                                        let body = &text[pos + 4..];
+                                                        if let Ok(info) = serde_json::from_str::<MyDeviceInfo>(body) {
+                                                            let clean_target = info.code.replace(" ", "");
+                                                            if clean_target != clean_my && !clean_target.is_empty() {
+                                                                let now_ms = SystemTime::now()
+                                                                    .duration_since(UNIX_EPOCH)
+                                                                    .unwrap()
+                                                                    .as_millis() as u64;
+
+                                                                let formatted_code = if clean_target.len() == 6 {
+                                                                    format!("{} {}", &clean_target[..3], &clean_target[3..])
+                                                                } else {
+                                                                    info.code.clone()
+                                                                };
+
+                                                                let mut map = devs.lock().unwrap();
+                                                                map.insert(
+                                                                    clean_target,
+                                                                    LanDevice {
+                                                                        code: formatted_code,
+                                                                        hostname: info.hostname,
+                                                                        os: info.os,
+                                                                        ip: target_ip,
+                                                                        port: info.port,
+                                                                        last_seen_ms: now_ms,
+                                                                    },
+                                                                );
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(3500)).await;
+                }
+            });
         });
     }
 }
+
+
 
 

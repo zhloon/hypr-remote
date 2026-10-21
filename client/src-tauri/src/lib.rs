@@ -156,7 +156,7 @@ async fn send_input_to_remote(
 pub fn run() {
     let port = 18080;
     let discovery = Arc::new(DiscoveryManager::new(port));
-    let server = Arc::new(EmbeddedHostServer::new(port, discovery.get_my_info().pin));
+    let server = Arc::new(EmbeddedHostServer::new(port, discovery.get_my_info()));
 
     let disc_clone = discovery.clone();
     let server_clone = server.clone();

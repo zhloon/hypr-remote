@@ -7,19 +7,24 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 
+use crate::types::MyDeviceInfo;
+
 pub struct EmbeddedHostServer {
     pub port: u16,
     pub pin: String,
+    pub my_info: MyDeviceInfo,
     frame_tx: watch::Sender<Vec<u8>>,
     frame_rx: watch::Receiver<Vec<u8>>,
 }
 
 impl EmbeddedHostServer {
-    pub fn new(port: u16, pin: String) -> Self {
+    pub fn new(port: u16, my_info: MyDeviceInfo) -> Self {
         let (frame_tx, frame_rx) = watch::channel(Vec::new());
+        let pin = my_info.pin.clone();
         Self {
             port,
             pin,
+            my_info,
             frame_tx,
             frame_rx,
         }
@@ -214,11 +219,17 @@ impl EmbeddedHostServer {
         }
         // 3. Ping / Info: GET /info
         else if method == "GET" && path.starts_with("/info") {
-            let response = "HTTP/1.1 200 OK\r\n\
+            let mut info = self.my_info.clone();
+            info.local_ip = crate::discovery::get_local_ip();
+            let json = serde_json::to_string(&info).unwrap_or_default();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\n\
                 Content-Type: application/json\r\n\
                 Access-Control-Allow-Origin: *\r\n\
-                Content-Length: 26\r\n\r\n\
-                {\"status\":\"ok\",\"ready\":true}";
+                Content-Length: {}\r\n\r\n{}",
+                json.len(),
+                json
+            );
             let _ = stream.write_all(response.as_bytes()).await;
         }
         // 4. CORS Preflight
