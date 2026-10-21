@@ -134,9 +134,19 @@ fn send_input_to_remote(
                     if stream.write_all(init_req.as_bytes()).await.is_ok() {
                         println!("[InputClient] Connected input stream to {}", addr_str);
                         while let Some(m) = rx.recv().await {
+                            let mut write_buf = Vec::with_capacity(256);
                             if let Ok(serialized) = serde_json::to_string(&m) {
-                                let line = format!("{}\n", serialized);
-                                if stream.write_all(line.as_bytes()).await.is_err() {
+                                write_buf.extend_from_slice(serialized.as_bytes());
+                                write_buf.push(b'\n');
+                            }
+                            while let Ok(next_m) = rx.try_recv() {
+                                if let Ok(serialized) = serde_json::to_string(&next_m) {
+                                    write_buf.extend_from_slice(serialized.as_bytes());
+                                    write_buf.push(b'\n');
+                                }
+                            }
+                            if !write_buf.is_empty() {
+                                if stream.write_all(&write_buf).await.is_err() {
                                     eprintln!("[InputClient] Write failed, connection lost to {}", addr_str);
                                     break;
                                 }

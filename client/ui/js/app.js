@@ -462,14 +462,14 @@ class HyprRemoteUnifiedApp {
 
     let lastPruneTime = performance.now();
     sourceBuffer.addEventListener('updateend', () => {
-      // Memory management: Prune old buffered video segments periodically (every 15s), NOT on every chunk!
+      // Memory management: Prune old buffered video segments periodically (every 30s), keeping 15s history
       const now = performance.now();
-      if (now - lastPruneTime > 15000 && !sourceBuffer.updating && video.currentTime > 15) {
+      if (now - lastPruneTime > 30000 && !sourceBuffer.updating && video.currentTime > 25) {
         lastPruneTime = now;
         try {
           const bStart = sourceBuffer.buffered.start(0);
-          if (video.currentTime - bStart > 12) {
-            sourceBuffer.remove(0, video.currentTime - 8);
+          if (video.currentTime - bStart > 25) {
+            sourceBuffer.remove(0, video.currentTime - 15);
           }
         } catch (_) {}
       }
