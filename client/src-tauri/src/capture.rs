@@ -3,29 +3,29 @@ use std::sync::Mutex;
 
 pub static CURRENT_SCREEN_WIDTH: AtomicU32 = AtomicU32::new(1920);
 pub static CURRENT_SCREEN_HEIGHT: AtomicU32 = AtomicU32::new(1080);
-pub static CAPTURE_QUALITY: AtomicU32 = AtomicU32::new(75);
-pub static CAPTURE_SCALE: AtomicU32 = AtomicU32::new(100);
+pub static CAPTURE_QUALITY: AtomicU32 = AtomicU32::new(68);
+pub static CAPTURE_SCALE: AtomicU32 = AtomicU32::new(85);
 pub static ACTIVE_MONITOR_NAME: Mutex<Option<String>> = Mutex::new(None);
 
 pub fn set_quality_mode(mode: &str) {
     match mode {
         "crystal" => {
-            // Ultra-clarity: 100% resolution, Quality 88 (crystal text, ideal for coding/reading)
-            CAPTURE_QUALITY.store(88, Ordering::Relaxed);
+            // Ultra-clarity: 100% resolution, Quality 85 (crystal text, ideal for coding/reading)
+            CAPTURE_QUALITY.store(85, Ordering::Relaxed);
             CAPTURE_SCALE.store(100, Ordering::Relaxed);
-            println!("[Capture] Switched to Ultra Clarity mode (Q=88, scale=1.0)");
+            println!("[Capture] Switched to Ultra Clarity mode (Q=85, scale=1.0)");
         }
         "performance" => {
-            // High-framerate: 80% resolution, Quality 65 (fastest encoding, 50-60 FPS)
-            CAPTURE_QUALITY.store(65, Ordering::Relaxed);
-            CAPTURE_SCALE.store(80, Ordering::Relaxed);
-            println!("[Capture] Switched to High Framerate mode (Q=65, scale=0.8)");
+            // High-framerate: 70% resolution, Quality 55 (fastest encoding, 60+ FPS)
+            CAPTURE_QUALITY.store(55, Ordering::Relaxed);
+            CAPTURE_SCALE.store(70, Ordering::Relaxed);
+            println!("[Capture] Switched to High Framerate mode (Q=55, scale=0.70)");
         }
         _ => {
-            // Balanced (default): 100% resolution, Quality 75
-            CAPTURE_QUALITY.store(75, Ordering::Relaxed);
-            CAPTURE_SCALE.store(100, Ordering::Relaxed);
-            println!("[Capture] Switched to Balanced mode (Q=75, scale=1.0)");
+            // Balanced (default): 85% resolution, Quality 68 (fast encoding, smooth 60 FPS)
+            CAPTURE_QUALITY.store(68, Ordering::Relaxed);
+            CAPTURE_SCALE.store(85, Ordering::Relaxed);
+            println!("[Capture] Switched to Balanced mode (Q=68, scale=0.85)");
         }
     }
 }
@@ -168,44 +168,47 @@ pub fn spawn_h264_recorder_process() -> Result<tokio::process::Child, std::io::E
 
     let mon_name = {
         let active = ACTIVE_MONITOR_NAME.lock().ok().and_then(|g| g.clone());
-        active.or_else(detect_focused_monitor)
+        active.or_else(detect_focused_monitor).or_else(|| {
+            if let Ok(output) = std::process::Command::new("wf-recorder").arg("-L").output() {
+                let s = String::from_utf8_lossy(&output.stdout);
+                s.lines().next().map(|l| l.trim().to_string())
+            } else {
+                None
+            }
+        })
     };
     let out_flag = match mon_name {
-        Some(ref m) => format!("-o {}", m),
-        None => "".to_string(),
+        Some(ref m) if !m.is_empty() => format!("-o {}", m),
+        _ => "".to_string(),
     };
 
     let (hw_args, has_hw) = if std::path::Path::new("/proc/driver/nvidia/version").exists() {
-        println!("[H264/GPU] Detected NVIDIA GPU -> Using h264_nvenc (Hardware Acceleration, 60fps, 25M, Ultra-Low Latency)");
-        ("-c h264_nvenc -p preset=p2 -p tune=ull -p b=25M -p g=15 -p bf=0 -x yuv420p", true)
+        println!("[H264/GPU] Detected NVIDIA GPU -> Using h264_nvenc (Hardware Acceleration, 60fps, Ultra-Low Latency)");
+        ("-c h264_nvenc -b 0 -p preset=ll -p g=15", true)
     } else if std::path::Path::new("/dev/dri/renderD128").exists() {
-        println!("[H264/GPU] Detected VA-API GPU (/dev/dri/renderD128) -> Using h264_vaapi (Hardware Acceleration, 60fps, 25M, NV12 Zero-Copy)");
-        ("-c h264_vaapi -d /dev/dri/renderD128 -x nv12 -p b=25M -p g=15 -p bf=0", true)
+        println!("[H264/GPU] Detected VA-API GPU (/dev/dri/renderD128) -> Using h264_vaapi (Hardware Acceleration, 60fps, Zero-Copy)");
+        ("-c h264_vaapi -d /dev/dri/renderD128 -b 0 -p g=15", true)
     } else if std::path::Path::new("/dev/dri/renderD129").exists() {
-        println!("[H264/GPU] Detected VA-API GPU (/dev/dri/renderD129) -> Using h264_vaapi (Hardware Acceleration, 60fps, 25M, NV12 Zero-Copy)");
-        ("-c h264_vaapi -d /dev/dri/renderD129 -x nv12 -p b=25M -p g=15 -p bf=0", true)
+        println!("[H264/GPU] Detected VA-API GPU (/dev/dri/renderD129) -> Using h264_vaapi (Hardware Acceleration, 60fps, Zero-Copy)");
+        ("-c h264_vaapi -d /dev/dri/renderD129 -b 0 -p g=15", true)
     } else {
-        println!("[H264/CPU] No dedicated hardware encoder node -> Using libx264 ultrafast (CRF 20, 60fps, 20M)");
-        ("-c libx264 -p preset=ultrafast -p tune=zerolatency -p crf=20 -p b=20M -p g=15 -p bf=0 -x yuv420p", false)
+        println!("[H264/CPU] No dedicated hardware encoder node -> Using libx264 ultrafast (60fps)");
+        ("-c libx264 -b 0 -p preset=ultrafast -p tune=zerolatency -p g=15", false)
     };
 
-    let cpu_fallback = "-c libx264 -p preset=ultrafast -p tune=zerolatency -p crf=22 -p b=18M -p g=15 -p bf=0 -x yuv420p";
+    let cpu_fallback = "-c libx264 -b 0 -p preset=ultrafast -p tune=zerolatency -p g=15";
 
-    // Continuous 60fps stream with -D (no-damage), overwrite (-y), zero b-frames (-p bf=0), and instant packet flush!
+    let primary_wf = format!("wf-recorder -D -y {} -m mpegts -r 60 {} -f /dev/stdout", out_flag, hw_args);
+    let cpu_wf = format!("wf-recorder -D -y {} -m mpegts -r 60 {} -f /dev/stdout", out_flag, cpu_fallback);
+
     let wf_cmd = if has_hw {
-        format!(
-            "(wf-recorder -D -y {} -m matroska -r 60 {} -f - 2>/dev/null || wf-recorder -D -y {} -m matroska -r 60 {} -f -)",
-            out_flag, hw_args, out_flag, cpu_fallback
-        )
+        format!("({} || {})", primary_wf, cpu_wf)
     } else {
-        format!(
-            "wf-recorder -D -y {} -m matroska -r 60 {} -f -",
-            out_flag, hw_args
-        )
+        cpu_wf
     };
 
     let pipeline = format!(
-        "{} | ffmpeg -hide_banner -loglevel error -flush_packets 1 -fflags nobuffer -flags low_delay -probesize 32768 -analyzeduration 0 -f matroska -i - -c:v copy -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof -frag_duration 16666 -",
+        "{} | ffmpeg -hide_banner -loglevel warning -flush_packets 1 -fflags nobuffer -flags low_delay -probesize 32768 -analyzeduration 0 -f mpegts -i - -c:v copy -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof -frag_duration 16666 -",
         wf_cmd
     );
 

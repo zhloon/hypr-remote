@@ -48,6 +48,12 @@ class HyprRemoteUnifiedApp {
     this.scaleMode = 'fit'; // Default standard aspect-ratio fit
     this.isH264Active = false;
     this.h264AbortController = null;
+    this.qualityModes = [
+      { id: 'h264', label: '🚀 硬件加速 (H.264 60fps)' },
+      { id: 'performance', label: '🏎️ 极速高帧 (GPU 60fps)' },
+      { id: 'balanced', label: '⚡ 平衡画质 (GPU)' },
+      { id: 'crystal', label: '💎 超清画质 (100% 2K/4K)' },
+    ];
     this.currentQualityIdx = 0;
     this.lastLocalClipboard = '';
     this.lastRemoteClipboard = '';
@@ -295,6 +301,10 @@ class HyprRemoteUnifiedApp {
     this._startH264Stream().catch((err) => {
       console.warn('Hardware H.264 stream unavailable, falling back to GPU Canvas loop:', err);
       if (this.sessionRunning && !this.isH264Active) {
+        this.currentQualityIdx = 1;
+        if (this.dom.btnToggleQuality) {
+          this.dom.btnToggleQuality.textContent = this.qualityModes[1].label;
+        }
         this._startStreamLoop();
       }
     });
@@ -429,6 +439,10 @@ class HyprRemoteUnifiedApp {
           this.h264AbortController.abort();
           this.h264AbortController = null;
         }
+        this.currentQualityIdx = 1;
+        if (this.dom.btnToggleQuality) {
+          this.dom.btnToggleQuality.textContent = this.qualityModes[1].label;
+        }
         this._startStreamLoop();
       }
     }, 4500);
@@ -440,9 +454,10 @@ class HyprRemoteUnifiedApp {
       if (canvas) canvas.style.display = 'none';
       if (img) img.style.display = 'none';
       this.isH264Active = true;
+      this.currentQualityIdx = 0;
       if (this.dom.statFps) this.dom.statFps.textContent = '60 FPS (HW)';
       if (this.dom.statLatency) this.dom.statLatency.textContent = '< 15ms';
-      if (this.dom.btnToggleQuality) this.dom.btnToggleQuality.textContent = '🚀 硬件加速 (H.264)';
+      if (this.dom.btnToggleQuality) this.dom.btnToggleQuality.textContent = this.qualityModes[0].label;
       this._updateCanvasLayout();
 
       if ('requestVideoFrameCallback' in video) {
@@ -461,6 +476,10 @@ class HyprRemoteUnifiedApp {
             clearTimeout(h264Watchdog);
             if (!this.isH264Active && this.sessionRunning) {
               console.warn('H.264 stream ended before playback, falling back to Canvas stream');
+              this.currentQualityIdx = 1;
+              if (this.dom.btnToggleQuality) {
+                this.dom.btnToggleQuality.textContent = this.qualityModes[1].label;
+              }
               this._startStreamLoop();
             }
             break;
@@ -473,6 +492,10 @@ class HyprRemoteUnifiedApp {
         if (e.name !== 'AbortError') {
           console.warn('H264 stream closed:', e);
           if (this.sessionRunning && !this.isH264Active) {
+            this.currentQualityIdx = 1;
+            if (this.dom.btnToggleQuality) {
+              this.dom.btnToggleQuality.textContent = this.qualityModes[1].label;
+            }
             this._startStreamLoop();
           }
         }
@@ -498,70 +521,77 @@ class HyprRemoteUnifiedApp {
     const ctx = this.ctx;
     let failCount = 0;
 
+    const fetchFrame = async () => {
+      const frameStart = performance.now();
+      const fetchUrl = `http://${this.activeSession.ip}:${this.activeSession.port}/frame?t=${Date.now()}`;
+      const res = await fetch(fetchUrl);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const blob = await res.blob();
+      const bitmap = await createImageBitmap(blob);
+      return { bitmap, latency: Math.round(performance.now() - frameStart) };
+    };
+
     const streamWorker = async () => {
       try {
+        let pendingFrame = fetchFrame();
         while (this.sessionRunning && this.activeSession && !this.isH264Active) {
-        const frameStart = performance.now();
-        try {
-          const fetchUrl = `http://${this.activeSession.ip}:${this.activeSession.port}/frame?t=${Date.now()}`;
-          const res = await fetch(fetchUrl);
-          if (!res.ok) {
+          try {
+            const { bitmap, latency } = await pendingFrame;
+            failCount = 0;
+
+            // Pipeline: Trigger next fetch in background while uploading to GPU & waiting for vsync
+            if (this.sessionRunning && this.activeSession && !this.isH264Active) {
+              pendingFrame = fetchFrame();
+            }
+
+            if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
+              canvas.width = bitmap.width;
+              canvas.height = bitmap.height;
+              this.remoteWidth = bitmap.width;
+              this.remoteHeight = bitmap.height;
+              this._updateCanvasLayout();
+            }
+
+            if (this.gpuRenderer) {
+              this.gpuRenderer.render(bitmap, bitmap.width, bitmap.height);
+            } else if (ctx) {
+              ctx.drawImage(bitmap, 0, 0);
+            }
+            bitmap.close();
+
+            // FPS calculation with GPU backend info
+            this.frameCount++;
+            const now = performance.now();
+            if (now - this.lastFpsTime >= 1000) {
+              const fps = Math.round((this.frameCount * 1000) / (now - this.lastFpsTime));
+              const backend = this.gpuRenderer ? this.gpuRenderer.getBackendName() : '2D';
+              if (this.dom.statFps) this.dom.statFps.textContent = `${fps} FPS (${backend})`;
+              this.frameCount = 0;
+              this.lastFpsTime = now;
+            }
+
+            if (this.dom.statLatency) {
+              this.dom.statLatency.textContent = `${Math.min(latency, 25)}ms`;
+            }
+
+            // Yield to browser vsync to maintain high framerate without UI blocking
+            await new Promise((r) => requestAnimationFrame(r));
+          } catch (e) {
             failCount++;
             if (failCount > 25) break; // fallback to MJPEG
             await new Promise((r) => setTimeout(r, 60));
-            continue;
+            if (this.sessionRunning && this.activeSession && !this.isH264Active) {
+              pendingFrame = fetchFrame();
+            }
           }
-          failCount = 0;
-
-          const blob = await res.blob();
-          const bitmap = await createImageBitmap(blob);
-
-          if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
-            canvas.width = bitmap.width;
-            canvas.height = bitmap.height;
-            this.remoteWidth = bitmap.width;
-            this.remoteHeight = bitmap.height;
-            this._updateCanvasLayout();
-          }
-
-          if (this.gpuRenderer) {
-            this.gpuRenderer.render(bitmap, bitmap.width, bitmap.height);
-          } else {
-            ctx.drawImage(bitmap, 0, 0);
-          }
-          bitmap.close();
-
-          // FPS calculation with GPU backend info
-          this.frameCount++;
-          const now = performance.now();
-          if (now - this.lastFpsTime >= 1000) {
-            const fps = Math.round((this.frameCount * 1000) / (now - this.lastFpsTime));
-            const backend = this.gpuRenderer ? this.gpuRenderer.getBackendName() : '2D';
-            if (this.dom.statFps) this.dom.statFps.textContent = `${fps} FPS (${backend})`;
-            this.frameCount = 0;
-            this.lastFpsTime = now;
-          }
-
-          const latency = Math.round(now - frameStart);
-          if (this.dom.statLatency) {
-            this.dom.statLatency.textContent = `${Math.min(latency, 25)}ms`;
-          }
-
-          // Yield to browser vsync to maintain high framerate without UI blocking
-          await new Promise((r) => requestAnimationFrame(r));
-        } catch (e) {
-          failCount++;
-          if (failCount > 25) break;
-          await new Promise((r) => setTimeout(r, 60));
         }
-      }
 
-      // Fallback: If single frame pull fails, use MJPEG stream directly
-      if (this.sessionRunning && this.activeSession && !this.isH264Active) {
-        canvas.style.display = 'none';
-        this.dom.remoteImg.style.display = 'block';
-        this.dom.remoteImg.src = `http://${this.activeSession.ip}:${this.activeSession.port}/stream?t=${Date.now()}`;
-      }
+        // Fallback: If single frame pull fails, use MJPEG stream directly
+        if (this.sessionRunning && this.activeSession && !this.isH264Active) {
+          canvas.style.display = 'none';
+          this.dom.remoteImg.style.display = 'block';
+          this.dom.remoteImg.src = `http://${this.activeSession.ip}:${this.activeSession.port}/stream?t=${Date.now()}`;
+        }
       } finally {
         this.isStreamLoopRunning = false;
       }
@@ -714,14 +744,8 @@ class HyprRemoteUnifiedApp {
   }
 
   toggleQualityMode() {
-    const modes = [
-      { id: 'h264', label: '🚀 硬件加速 (H.264)' },
-      { id: 'balanced', label: '⚡ 平衡模式 (JPEG)' },
-      { id: 'crystal', label: '💎 超清画质 (JPEG)' },
-      { id: 'performance', label: '🏎️ 极速高帧 (JPEG)' },
-    ];
-    this.currentQualityIdx = ((this.currentQualityIdx || 0) + 1) % modes.length;
-    const mode = modes[this.currentQualityIdx];
+    this.currentQualityIdx = ((this.currentQualityIdx || 0) + 1) % this.qualityModes.length;
+    const mode = this.qualityModes[this.currentQualityIdx];
     if (this.dom.btnToggleQuality) {
       this.dom.btnToggleQuality.textContent = mode.label;
     }
@@ -729,7 +753,11 @@ class HyprRemoteUnifiedApp {
 
     if (mode.id === 'h264') {
       this._startH264Stream().catch((e) => {
-        console.warn('Switch to H.264 failed, staying on Canvas:', e);
+        console.warn('Switch to H.264 failed, falling back to GPU Canvas:', e);
+        this.currentQualityIdx = 1;
+        if (this.dom.btnToggleQuality) {
+          this.dom.btnToggleQuality.textContent = this.qualityModes[1].label;
+        }
         this._startStreamLoop();
       });
     } else {
