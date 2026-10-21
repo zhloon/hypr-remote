@@ -310,6 +310,8 @@ impl EmbeddedHostServer {
                 "HTTP/1.1 200 OK\r\n\
                 Content-Type: application/json; charset=utf-8\r\n\
                 Access-Control-Allow-Origin: *\r\n\
+                Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n\
+                Access-Control-Allow-Headers: *\r\n\
                 Content-Length: {}\r\n\r\n{}",
                 body.len(),
                 body
@@ -317,22 +319,45 @@ impl EmbeddedHostServer {
             let _ = stream.write_all(response.as_bytes()).await;
         }
         else if method == "POST" && path.starts_with("/clipboard") {
-            let body = if let Some(pos) = request_str.find("\r\n\r\n") {
-                &request_str[pos + 4..]
+            let mut expected_len = 0;
+            for line in request_str.lines() {
+                if let Some(val) = line.to_lowercase().strip_prefix("content-length:") {
+                    if let Ok(l) = val.trim().parse::<usize>() {
+                        expected_len = l;
+                    }
+                }
+            }
+
+            let mut body_bytes = Vec::new();
+            if let Some(pos) = request_str.find("\r\n\r\n") {
+                let initial_body = &buf[pos + 4..bytes_read];
+                body_bytes.extend_from_slice(initial_body);
+            }
+
+            while body_bytes.len() < expected_len && body_bytes.len() < 2 * 1024 * 1024 {
+                let mut temp = [0u8; 4096];
+                match stream.read(&mut temp).await {
+                    Ok(n) if n > 0 => body_bytes.extend_from_slice(&temp[..n]),
+                    _ => break,
+                }
+            }
+
+            let body_str = String::from_utf8_lossy(&body_bytes);
+            let text_to_set = if let Ok(val) = serde_json::from_str::<serde_json::Value>(&body_str) {
+                val["content"].as_str().map(|s| s.to_string()).unwrap_or_else(|| body_str.to_string())
             } else {
-                ""
+                body_str.to_string()
             };
-            let text_to_set = if let Ok(val) = serde_json::from_str::<serde_json::Value>(body) {
-                val["content"].as_str().unwrap_or(body).to_string()
-            } else {
-                body.to_string()
-            };
+
             if !text_to_set.is_empty() {
                 crate::clipboard::set_os_clipboard(&text_to_set);
             }
+
             let response = "HTTP/1.1 200 OK\r\n\
-                Content-Type: application/json\r\n\
+                Content-Type: application/json; charset=utf-8\r\n\
                 Access-Control-Allow-Origin: *\r\n\
+                Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n\
+                Access-Control-Allow-Headers: *\r\n\
                 Content-Length: 15\r\n\r\n\
                 {\"status\":\"ok\"}";
             let _ = stream.write_all(response.as_bytes()).await;

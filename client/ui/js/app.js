@@ -1,4 +1,5 @@
 import { WEB_TO_LINUX_KEYMAP } from './keycodes.js';
+import { WgpuRenderer } from './wgpu_renderer.js';
 
 class HyprRemoteUnifiedApp {
   constructor() {
@@ -51,7 +52,9 @@ class HyprRemoteUnifiedApp {
     this.lastLocalClipboard = '';
     this.lastRemoteClipboard = '';
     this.clipboardTimer = null;
+    this._isSyncingClipboard = false;
 
+    this.gpuRenderer = this.dom.remoteCanvas ? new WgpuRenderer(this.dom.remoteCanvas) : null;
     this.ctx = this.dom.remoteCanvas ? this.dom.remoteCanvas.getContext('2d', { alpha: false }) : null;
 
     this.onMouseMove = this.onMouseMove.bind(this);
@@ -66,6 +69,9 @@ class HyprRemoteUnifiedApp {
 
   async init() {
     this._bindEvents();
+    if (this.gpuRenderer) {
+      await this.gpuRenderer.init();
+    }
     await this._loadMyInfo();
     this._startLanPolling();
   }
@@ -135,16 +141,6 @@ class HyprRemoteUnifiedApp {
     if (this.dom.btnSyncClipboard) {
       this.dom.btnSyncClipboard.addEventListener('click', () => this.syncClipboard(true));
     }
-
-    // Fullscreen listener via F11 or Esc
-    window.addEventListener('keydown', (e) => {
-      if (e.key === 'F11') {
-        e.preventDefault();
-        this.toggleFullscreen();
-      } else if (e.key === 'Escape' && this.isFullscreen && !this.isPointerLocked) {
-        this.toggleFullscreen();
-      }
-    });
 
     // Click on screen activates pointer lock
     [this.dom.remoteVideo, this.dom.remoteCanvas, this.dom.remoteImg].forEach((target) => {
@@ -282,7 +278,11 @@ class HyprRemoteUnifiedApp {
               this.remoteHeight = bitmap.height;
               this._updateCanvasLayout();
             }
-            this.ctx?.drawImage(bitmap, 0, 0);
+            if (this.gpuRenderer) {
+              this.gpuRenderer.render(bitmap, bitmap.width, bitmap.height);
+            } else {
+              this.ctx?.drawImage(bitmap, 0, 0);
+            }
           }
           bitmap.close();
         }
@@ -524,15 +524,20 @@ class HyprRemoteUnifiedApp {
             this._updateCanvasLayout();
           }
 
-          ctx.drawImage(bitmap, 0, 0);
+          if (this.gpuRenderer) {
+            this.gpuRenderer.render(bitmap, bitmap.width, bitmap.height);
+          } else {
+            ctx.drawImage(bitmap, 0, 0);
+          }
           bitmap.close();
 
-          // FPS calculation
+          // FPS calculation with GPU backend info
           this.frameCount++;
           const now = performance.now();
           if (now - this.lastFpsTime >= 1000) {
             const fps = Math.round((this.frameCount * 1000) / (now - this.lastFpsTime));
-            if (this.dom.statFps) this.dom.statFps.textContent = `${fps} FPS`;
+            const backend = this.gpuRenderer ? this.gpuRenderer.getBackendName() : '2D';
+            if (this.dom.statFps) this.dom.statFps.textContent = `${fps} FPS (${backend})`;
             this.frameCount = 0;
             this.lastFpsTime = now;
           }
@@ -620,11 +625,12 @@ class HyprRemoteUnifiedApp {
   _startClipboardSync() {
     this._stopClipboardSync();
     this.syncClipboard(false);
+    // 250ms polling for instant copy-paste response
     this.clipboardTimer = setInterval(() => {
       if (this.sessionRunning && this.activeSession) {
         this.syncClipboard(false);
       }
-    }, 600);
+    }, 250);
   }
 
   _stopClipboardSync() {
@@ -635,10 +641,11 @@ class HyprRemoteUnifiedApp {
   }
 
   async syncClipboard(forceFeedback = false) {
-    if (!this.sessionRunning || !this.activeSession) return;
+    if (!this.sessionRunning || !this.activeSession || this._isSyncingClipboard) return;
+    this._isSyncingClipboard = true;
 
     try {
-      // 1. Read local clipboard
+      // 1. Read local OS clipboard
       let localText = '';
       if (this.isTauri) {
         try {
@@ -653,10 +660,11 @@ class HyprRemoteUnifiedApp {
       // 2. If local clipboard has changed, push to remote host
       if (localText && localText !== this.lastLocalClipboard && localText !== this.lastRemoteClipboard) {
         this.lastLocalClipboard = localText;
+        this.lastRemoteClipboard = localText;
         await fetch(`http://${this.activeSession.ip}:${this.activeSession.port}/clipboard`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ content: localText }),
+          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+          body: localText,
         });
         if (this.dom.btnSyncClipboard) {
           this.dom.btnSyncClipboard.textContent = '✅ 已同步到远程';
@@ -667,13 +675,14 @@ class HyprRemoteUnifiedApp {
         return;
       }
 
-      // 3. Otherwise, pull remote clipboard
+      // 3. Otherwise, pull remote host clipboard
       const res = await fetch(`http://${this.activeSession.ip}:${this.activeSession.port}/clipboard`);
       if (res.ok) {
         const data = await res.json();
         const remoteText = data.content || '';
         if (remoteText && remoteText !== this.lastRemoteClipboard && remoteText !== this.lastLocalClipboard) {
           this.lastRemoteClipboard = remoteText;
+          this.lastLocalClipboard = remoteText;
           if (this.isTauri) {
             await window.__TAURI__.core.invoke('set_local_clipboard', { content: remoteText });
           } else if (navigator.clipboard?.writeText) {
@@ -699,6 +708,8 @@ class HyprRemoteUnifiedApp {
       if (forceFeedback) {
         console.warn('Clipboard sync error:', e);
       }
+    } finally {
+      this._isSyncingClipboard = false;
     }
   }
 
@@ -959,16 +970,18 @@ class HyprRemoteUnifiedApp {
   }
 
   onKeyDown(e) {
+    if (!this.sessionRunning || !this.activeSession) return;
+
     if (e.code === 'Escape' && this.isPointerLocked) {
       document.exitPointerLock?.();
       return;
     }
 
+    // Direct 1:1 pass-through: do not capture or remap shortcut keys locally!
     const linuxCode = WEB_TO_LINUX_KEYMAP[e.code];
     if (linuxCode !== undefined) {
-      if (['Tab', 'AltLeft', 'AltRight', 'MetaLeft', 'MetaRight'].includes(e.code)) {
-        e.preventDefault();
-      }
+      // Prevent local browser/webview from swallowing standard system hotkeys
+      e.preventDefault();
       this._sendInput({
         type: 'Key',
         code: linuxCode,
@@ -978,8 +991,11 @@ class HyprRemoteUnifiedApp {
   }
 
   onKeyUp(e) {
+    if (!this.sessionRunning || !this.activeSession) return;
+
     const linuxCode = WEB_TO_LINUX_KEYMAP[e.code];
     if (linuxCode !== undefined) {
+      e.preventDefault();
       this._sendInput({
         type: 'Key',
         code: linuxCode,

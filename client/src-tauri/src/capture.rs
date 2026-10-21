@@ -205,7 +205,7 @@ pub fn spawn_h264_recorder_process() -> Result<tokio::process::Child, std::io::E
     };
 
     let pipeline = format!(
-        "{} | ffmpeg -hide_banner -loglevel error -flush_packets 1 -f matroska -i - -c:v copy -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof -frag_duration 16666 -",
+        "{} | ffmpeg -hide_banner -loglevel error -flush_packets 1 -fflags nobuffer -flags low_delay -probesize 32768 -analyzeduration 0 -f matroska -i - -c:v copy -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof -frag_duration 16666 -",
         wf_cmd
     );
 
