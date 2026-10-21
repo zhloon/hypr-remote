@@ -203,29 +203,21 @@ pub fn spawn_h264_recorder_process() -> Result<tokio::process::Child, std::io::E
         _ => "".to_string(),
     };
 
-    let (hw_args, has_hw) = if std::path::Path::new("/proc/driver/nvidia/version").exists() {
-        println!("[H264/GPU] Detected NVIDIA GPU -> Using h264_nvenc (Hardware Acceleration, 120fps, Ultra-Low Latency)");
-        ("-c h264_nvenc -b 0 -p preset=p1 -p tune=ull -p g=30", true)
-    } else if std::path::Path::new("/dev/dri/renderD128").exists() {
-        println!("[H264/GPU] Detected VA-API GPU (/dev/dri/renderD128) -> Using h264_vaapi (Hardware Acceleration, 120fps, Zero-Copy)");
-        ("-c h264_vaapi -d /dev/dri/renderD128 -b 0 -p g=30", true)
-    } else if std::path::Path::new("/dev/dri/renderD129").exists() {
-        println!("[H264/GPU] Detected VA-API GPU (/dev/dri/renderD129) -> Using h264_vaapi (Hardware Acceleration, 120fps, Zero-Copy)");
-        ("-c h264_vaapi -d /dev/dri/renderD129 -b 0 -p g=30", true)
-    } else {
-        println!("[H264/CPU] No dedicated hardware encoder node -> Using libx264 ultrafast (120fps, capped 2 threads)");
-        ("-c libx264 -b 0 -p preset=ultrafast -p tune=zerolatency -p g=30 -p threads=2", false)
-    };
-
-    // If CPU fallback is needed, cap threads=2 to prevent 300%+ CPU throttling / thermal runaway!
-    let cpu_fallback = "-c libx264 -b 0 -p preset=ultrafast -p tune=zerolatency -p g=30 -p threads=2";
-
-    let primary_wf = format!("wf-recorder -D -y {} -m mpegts -r 120 {} -f /dev/stdout", out_flag, hw_args);
-    let cpu_wf = format!("wf-recorder -D -y {} -m mpegts -r 120 {} -f /dev/stdout", out_flag, cpu_fallback);
-
     let is_nvidia = std::path::Path::new("/proc/driver/nvidia/version").exists();
     let has_vaapi = std::path::Path::new("/dev/dri/renderD128").exists() || std::path::Path::new("/dev/dri/renderD129").exists();
     let vaapi_dev = if std::path::Path::new("/dev/dri/renderD128").exists() { "/dev/dri/renderD128" } else { "/dev/dri/renderD129" };
+
+    if is_nvidia {
+        println!("[H264/GPU] Detected NVIDIA GPU -> Preferring h264_nvenc (Hardware Acceleration, 120fps, Ultra-Low Latency)");
+    } else if has_vaapi {
+        println!("[H264/GPU] Detected VA-API GPU ({}) -> Using h264_vaapi (Hardware Acceleration, 120fps, Zero-Copy)", vaapi_dev);
+    } else {
+        println!("[H264/CPU] No dedicated hardware encoder node -> Using libx264 ultrafast (120fps, capped 2 threads)");
+    }
+
+    // If CPU fallback is needed, cap threads=2 to prevent 300%+ CPU throttling / thermal runaway!
+    let cpu_fallback = "-c libx264 -b 0 -p preset=ultrafast -p tune=zerolatency -p g=30 -p threads=2";
+    let cpu_wf = format!("wf-recorder -D -y {} -m mpegts -r 120 {} -f /dev/stdout", out_flag, cpu_fallback);
     let vaapi_wf = format!("wf-recorder -D -y {} -m mpegts -r 120 -c h264_vaapi -d {} -b 0 -p g=30 -f /dev/stdout", out_flag, vaapi_dev);
 
     let wf_cmd = if is_nvidia {
