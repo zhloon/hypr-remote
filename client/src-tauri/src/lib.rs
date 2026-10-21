@@ -7,8 +7,11 @@ pub mod types;
 use discovery::DiscoveryManager;
 use server::EmbeddedHostServer;
 use std::sync::Arc;
+#[allow(unused_imports)]
 use tauri::menu::{Menu, MenuItem};
+#[allow(unused_imports)]
 use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
+#[allow(unused_imports)]
 use tauri::{AppHandle, Manager, State, WindowEvent};
 use types::{ConnectResult, ControlMessage, LanDevice, MyDeviceInfo};
 
@@ -176,15 +179,18 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(state)
-        .setup(move |app| {
+        .setup(move |_app| {
             disc_clone.start_background();
             server_clone.start_background();
 
-            // 1. Setup Tray Menu (non-fatal, only built if an icon is present)
-            if let Some(icon) = app.default_window_icon() {
-                if let Ok(show_i) = MenuItem::with_id(app, "show", "🖥️ 显示主界面", true, None::<&str>) {
-                    if let Ok(quit_i) = MenuItem::with_id(app, "quit", "❌ 彻底退出", true, None::<&str>) {
-                        if let Ok(menu) = Menu::with_items(app, &[&show_i, &quit_i]) {
+            // 1. Setup Tray Menu (Linux only: on modern macOS AppKit, NSStatusBarButton
+            // custom subview in tray-icon triggers _appearanceForNonVibrantContent -> _fauxVibrantDarkAppearance SIGABRT).
+            // On macOS, HyprRemote runs as a standard desktop client with native window & dock.
+            #[cfg(target_os = "linux")]
+            if let Some(icon) = _app.default_window_icon() {
+                if let Ok(show_i) = MenuItem::with_id(_app, "show", "🖥️ 显示主界面", true, None::<&str>) {
+                    if let Ok(quit_i) = MenuItem::with_id(_app, "quit", "❌ 彻底退出", true, None::<&str>) {
+                        if let Ok(menu) = Menu::with_items(_app, &[&show_i, &quit_i]) {
                             let tray_builder = TrayIconBuilder::new()
                                 .icon(icon.clone())
                                 .menu(&menu)
@@ -213,7 +219,7 @@ pub fn run() {
                                     }
                                 });
 
-                            if let Err(e) = tray_builder.build(app) {
+                            if let Err(e) = tray_builder.build(_app) {
                                 eprintln!("[Tray] System tray unavailable ({}), running without tray icon.", e);
                             }
                         }
@@ -223,11 +229,12 @@ pub fn run() {
 
             Ok(())
         })
-        .on_window_event(|window, event| {
-            // Close window -> minimize to tray / run in background!
-            if let WindowEvent::CloseRequested { api, .. } = event {
+        .on_window_event(|_window, _event| {
+            // Close window -> on Linux minimize to background tray; on macOS close cleanly!
+            #[cfg(target_os = "linux")]
+            if let WindowEvent::CloseRequested { api, .. } = _event {
                 api.prevent_close();
-                let _ = window.hide();
+                let _ = _window.hide();
             }
         })
         .invoke_handler(tauri::generate_handler![
