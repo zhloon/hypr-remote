@@ -174,7 +174,7 @@ mod linux_impl {
     use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::io::AsRawFd;
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 
     const UI_SET_EVBIT: libc::c_ulong = 1074025828;
     const UI_SET_KEYBIT: libc::c_ulong = 1074025829;
