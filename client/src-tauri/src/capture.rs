@@ -196,26 +196,39 @@ pub fn spawn_h264_recorder_process() -> Result<tokio::process::Child, std::io::E
     cmd.arg("-m").arg("mp4");
     cmd.arg("--muxer-param=movflags=frag_keyframe+empty_moov+default_base_moof");
     cmd.arg("-x").arg("yuv420p");
-    cmd.arg("-p").arg("tune=zerolatency");
-    cmd.arg("-F").arg("fps=60");
+    cmd.arg("-r").arg("60");       // Strict 60 FPS capture rate
+    cmd.arg("-b").arg("24M");      // 24 Mbps high-definition bitrate for sharp text
 
     // Detect hardware acceleration device
     if std::path::Path::new("/proc/driver/nvidia/version").exists() {
-        println!("[H264] Detected NVIDIA GPU -> Using h264_nvenc");
+        println!("[H264] Detected NVIDIA GPU -> Using h264_nvenc (llhp, zerolatency, 60fps, 24M)");
         cmd.arg("-c").arg("h264_nvenc");
         cmd.arg("-p").arg("preset=p1");
+        cmd.arg("-p").arg("tune=zerolatency");
+        cmd.arg("-p").arg("zerolatency=1");
+        cmd.arg("-p").arg("delay=0");
+        cmd.arg("-p").arg("g=30");    // 0.5s GOP keyframe interval
+        cmd.arg("-p").arg("bf=0");   // 0 B-frames to eliminate reordering latency
     } else if std::path::Path::new("/dev/dri/renderD128").exists() {
-        println!("[H264] Detected VA-API GPU (/dev/dri/renderD128) -> Using h264_vaapi");
+        println!("[H264] Detected VA-API GPU (/dev/dri/renderD128) -> Using h264_vaapi (24M, 60fps)");
         cmd.arg("-c").arg("h264_vaapi");
         cmd.arg("-d").arg("/dev/dri/renderD128");
+        cmd.arg("-p").arg("g=30");
+        cmd.arg("-p").arg("bf=0");
     } else if std::path::Path::new("/dev/dri/renderD129").exists() {
-        println!("[H264] Detected VA-API GPU (/dev/dri/renderD129) -> Using h264_vaapi");
+        println!("[H264] Detected VA-API GPU (/dev/dri/renderD129) -> Using h264_vaapi (24M, 60fps)");
         cmd.arg("-c").arg("h264_vaapi");
         cmd.arg("-d").arg("/dev/dri/renderD129");
+        cmd.arg("-p").arg("g=30");
+        cmd.arg("-p").arg("bf=0");
     } else {
-        println!("[H264] No dedicated hardware encoder node -> Using libx264 ultrafast");
+        println!("[H264] No dedicated hardware encoder node -> Using libx264 ultrafast (CRF 19, 60fps)");
         cmd.arg("-c").arg("libx264");
         cmd.arg("-p").arg("preset=ultrafast");
+        cmd.arg("-p").arg("tune=zerolatency");
+        cmd.arg("-p").arg("crf=19");
+        cmd.arg("-p").arg("g=30");
+        cmd.arg("-p").arg("bf=0");
     }
 
     cmd.arg("-f").arg("-");

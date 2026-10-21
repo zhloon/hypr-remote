@@ -455,6 +455,7 @@ body {
   image-rendering: -webkit-optimize-contrast;
   image-rendering: crisp-edges;
   transform: translateZ(0);
+  object-fit: fill !important;
 }
 
 #remote-screen-video.stretched,

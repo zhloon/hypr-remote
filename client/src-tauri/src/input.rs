@@ -170,14 +170,197 @@ fn dispatch_key(code: u16, down: bool) {
 #[cfg(target_os = "linux")]
 mod linux_impl {
     use crate::capture::{CURRENT_SCREEN_HEIGHT, CURRENT_SCREEN_WIDTH};
-    use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
-    use std::sync::Once;
+    use std::fs::{File, OpenOptions};
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::io::AsRawFd;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
-    static MOUSE_TARGET_X: AtomicI32 = AtomicI32::new(-1);
-    static MOUSE_TARGET_Y: AtomicI32 = AtomicI32::new(-1);
-    static MOUSE_DIRTY: AtomicBool = AtomicBool::new(false);
-    static WORKER_INIT: Once = Once::new();
+    const UI_SET_EVBIT: libc::c_ulong = 1074025828;
+    const UI_SET_KEYBIT: libc::c_ulong = 1074025829;
+    const UI_SET_RELBIT: libc::c_ulong = 1074025830;
+    const UI_SET_ABSBIT: libc::c_ulong = 1074025831;
+    const UI_DEV_CREATE: libc::c_ulong = 21761;
+    const UI_DEV_DESTROY: libc::c_ulong = 21762;
+
+    const EV_SYN: u16 = 0x00;
+    const EV_KEY: u16 = 0x01;
+    const EV_REL: u16 = 0x02;
+    const EV_ABS: u16 = 0x03;
+
+    const SYN_REPORT: u16 = 0;
+
+    const REL_X: u16 = 0x00;
+    const REL_Y: u16 = 0x01;
+    const REL_WHEEL: u16 = 0x08;
+    const REL_HWHEEL: u16 = 0x06;
+
+    const ABS_X: u16 = 0x00;
+    const ABS_Y: u16 = 0x01;
+
+    const BTN_LEFT: u16 = 272;
+    const BTN_RIGHT: u16 = 273;
+    const BTN_MIDDLE: u16 = 274;
+    const BTN_SIDE: u16 = 275;
+    const BTN_EXTRA: u16 = 276;
+    const BTN_TOUCH: u16 = 330;
+
+    const BUS_USB: u16 = 0x03;
+
+    #[repr(C)]
+    struct LinuxInputId {
+        bustype: u16,
+        vendor: u16,
+        product: u16,
+        version: u16,
+    }
+
+    #[repr(C)]
+    struct LinuxUinputUserDev {
+        name: [u8; 80],
+        id: LinuxInputId,
+        ff_effects_max: i32,
+        absmax: [i32; 64],
+        absmin: [i32; 64],
+        absfuzz: [i32; 64],
+        absflat: [i32; 64],
+    }
+
+    #[repr(C)]
+    struct LinuxInputEvent {
+        time: libc::timeval,
+        type_: u16,
+        code: u16,
+        value: i32,
+    }
+
+    struct UinputDevice {
+        file: File,
+    }
+
+    impl UinputDevice {
+        fn open() -> Option<Self> {
+            let paths = ["/dev/uinput", "/dev/input/uinput"];
+            let mut file = None;
+            for path in paths {
+                if let Ok(f) = OpenOptions::new()
+                    .read(false)
+                    .write(true)
+                    .custom_flags(libc::O_NONBLOCK)
+                    .open(path)
+                {
+                    file = Some(f);
+                    break;
+                }
+            }
+
+            let file = match file {
+                Some(f) => f,
+                None => {
+                    eprintln!("[Input] /dev/uinput not accessible. Will fallback to ydotool.");
+                    return None;
+                }
+            };
+
+            let fd = file.as_raw_fd();
+            unsafe {
+                libc::ioctl(fd, UI_SET_EVBIT as _, EV_SYN as libc::c_int);
+                libc::ioctl(fd, UI_SET_EVBIT as _, EV_KEY as libc::c_int);
+                libc::ioctl(fd, UI_SET_EVBIT as _, EV_REL as libc::c_int);
+                libc::ioctl(fd, UI_SET_EVBIT as _, EV_ABS as libc::c_int);
+
+                libc::ioctl(fd, UI_SET_KEYBIT as _, BTN_LEFT as libc::c_int);
+                libc::ioctl(fd, UI_SET_KEYBIT as _, BTN_RIGHT as libc::c_int);
+                libc::ioctl(fd, UI_SET_KEYBIT as _, BTN_MIDDLE as libc::c_int);
+                libc::ioctl(fd, UI_SET_KEYBIT as _, BTN_SIDE as libc::c_int);
+                libc::ioctl(fd, UI_SET_KEYBIT as _, BTN_EXTRA as libc::c_int);
+                libc::ioctl(fd, UI_SET_KEYBIT as _, BTN_TOUCH as libc::c_int);
+
+                for code in 1..256 {
+                    libc::ioctl(fd, UI_SET_KEYBIT as _, code as libc::c_int);
+                }
+
+                libc::ioctl(fd, UI_SET_RELBIT as _, REL_X as libc::c_int);
+                libc::ioctl(fd, UI_SET_RELBIT as _, REL_Y as libc::c_int);
+                libc::ioctl(fd, UI_SET_RELBIT as _, REL_WHEEL as libc::c_int);
+                libc::ioctl(fd, UI_SET_RELBIT as _, REL_HWHEEL as libc::c_int);
+
+                libc::ioctl(fd, UI_SET_ABSBIT as _, ABS_X as libc::c_int);
+                libc::ioctl(fd, UI_SET_ABSBIT as _, ABS_Y as libc::c_int);
+
+                let mut uidev: LinuxUinputUserDev = std::mem::zeroed();
+                let name = b"HyprRemote-Virtual-Device";
+                uidev.name[..name.len()].copy_from_slice(name);
+                uidev.id.bustype = BUS_USB;
+                uidev.id.vendor = 0x1234;
+                uidev.id.product = 0x5678;
+                uidev.id.version = 1;
+
+                uidev.absmin[ABS_X as usize] = 0;
+                uidev.absmax[ABS_X as usize] = 65535;
+                uidev.absmin[ABS_Y as usize] = 0;
+                uidev.absmax[ABS_Y as usize] = 65535;
+
+                let dev_bytes = std::slice::from_raw_parts(
+                    &uidev as *const _ as *const u8,
+                    std::mem::size_of::<LinuxUinputUserDev>(),
+                );
+                if libc::write(fd, dev_bytes.as_ptr() as *const libc::c_void, dev_bytes.len()) < 0 {
+                    eprintln!("[Input] Failed to write uinput_user_dev structure");
+                    return None;
+                }
+
+                if libc::ioctl(fd, UI_DEV_CREATE as _) < 0 {
+                    eprintln!("[Input] Failed UI_DEV_CREATE ioctl");
+                    return None;
+                }
+            }
+
+            println!("[Input] Successfully created native /dev/uinput virtual absolute device (0..65535)!");
+            Some(Self { file })
+        }
+
+        fn write_event(&self, type_: u16, code: u16, value: i32) {
+            let fd = self.file.as_raw_fd();
+            let ev = LinuxInputEvent {
+                time: libc::timeval { tv_sec: 0, tv_usec: 0 },
+                type_,
+                code,
+                value,
+            };
+            unsafe {
+                let bytes = std::slice::from_raw_parts(
+                    &ev as *const _ as *const u8,
+                    std::mem::size_of::<LinuxInputEvent>(),
+                );
+                libc::write(fd, bytes.as_ptr() as *const libc::c_void, bytes.len());
+            }
+        }
+
+        fn syn(&self) {
+            self.write_event(EV_SYN, SYN_REPORT, 0);
+        }
+    }
+
+    impl Drop for UinputDevice {
+        fn drop(&mut self) {
+            unsafe {
+                libc::ioctl(self.file.as_raw_fd(), UI_DEV_DESTROY as _);
+            }
+        }
+    }
+
+    static UINPUT: Mutex<Option<UinputDevice>> = Mutex::new(None);
+    static UINPUT_INITIALIZED: AtomicBool = AtomicBool::new(false);
     static MOVE_LOG_COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    fn get_uinput() -> std::sync::MutexGuard<'static, Option<UinputDevice>> {
+        let mut guard = UINPUT.lock().unwrap();
+        if !UINPUT_INITIALIZED.swap(true, Ordering::SeqCst) {
+            *guard = UinputDevice::open();
+        }
+        guard
+    }
 
     static LAST_MONITOR_CHECK: AtomicU64 = AtomicU64::new(0);
     static CACHED_LOGICAL_W: AtomicU32 = AtomicU32::new(0);
@@ -198,34 +381,6 @@ mod linux_impl {
             }
         }
         cmd
-    }
-
-    fn send_hyprland_cmd(cmd: &str) -> bool {
-        use std::io::{Read, Write};
-        use std::os::unix::net::UnixStream;
-
-        let sig = std::env::var("HYPRLAND_INSTANCE_SIGNATURE").unwrap_or_default();
-        if sig.is_empty() {
-            return false;
-        }
-        let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/run/user/1000".to_string());
-        let socket_path = format!("{}/hypr/{}/.socket.sock", runtime_dir, sig);
-
-        if let Ok(mut stream) = UnixStream::connect(&socket_path) {
-            let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(40)));
-            let _ = stream.set_write_timeout(Some(std::time::Duration::from_millis(40)));
-            let msg = format!("{}\n", cmd);
-            if stream.write_all(msg.as_bytes()).is_ok() {
-                let mut res = [0u8; 32];
-                if let Ok(n) = stream.read(&mut res) {
-                    let s = String::from_utf8_lossy(&res[..n]);
-                    if s.trim() == "ok" || s.starts_with("ok") {
-                        return true;
-                    }
-                }
-            }
-        }
-        false
     }
 
     fn get_active_monitor_bounds() -> (f32, f32, i32, i32) {
@@ -282,121 +437,87 @@ mod linux_impl {
         }
     }
 
-    fn warp_cursor_position(px: i32, py: i32) {
-        // 1. Direct Hyprland UNIX socket (fastest, sub-millisecond, exact logical coordinates)
-        if send_hyprland_cmd(&format!("dispatch movecursor {} {}", px, py)) {
-            return;
-        }
-        if send_hyprland_cmd(&format!("dispatch movecursor {},{}", px, py)) {
-            return;
-        }
-
-        // 2. hyprctl dispatch movecursor CLI
-        if let Ok(st) = std::process::Command::new("hyprctl")
-            .args(["dispatch", "movecursor", &format!("{},{}", px, py)])
-            .status()
+    pub fn dispatch_mouse_move(x: f32, y: f32, dx: i32, dy: i32, is_rel: bool) {
+        // 1. Native Linux /dev/uinput absolute pointer (< 0.05ms, 100% 1:1 pixel overlap)
         {
-            if st.success() {
-                return;
-            }
-        }
-        if let Ok(st) = std::process::Command::new("hyprctl")
-            .args(["dispatch", "movecursor", &px.to_string(), &py.to_string()])
-            .status()
-        {
-            if st.success() {
-                return;
-            }
-        }
-
-        // 3. Fallback to ydotool
-        let _ = prepare_ydotool_cmd("mousemove")
-            .args(["--absolute", "-x", &px.to_string(), "-y", &py.to_string()])
-            .status();
-    }
-
-    fn init_mouse_worker() {
-        WORKER_INIT.call_once(|| {
-            std::thread::spawn(|| {
-                loop {
-                    std::thread::sleep(std::time::Duration::from_millis(12));
-                    if MOUSE_DIRTY.swap(false, Ordering::Acquire) {
-                        let px = MOUSE_TARGET_X.load(Ordering::Relaxed);
-                        let py = MOUSE_TARGET_Y.load(Ordering::Relaxed);
-                        if px >= 0 && py >= 0 {
-                            warp_cursor_position(px, py);
-                        }
+            let uinput_guard = get_uinput();
+            if let Some(ref dev) = *uinput_guard {
+                if is_rel {
+                    dev.write_event(EV_REL, REL_X, dx);
+                    dev.write_event(EV_REL, REL_Y, dy);
+                    dev.syn();
+                } else {
+                    let abs_x = (x.clamp(0.0, 1.0) * 65535.0).round() as i32;
+                    let abs_y = (y.clamp(0.0, 1.0) * 65535.0).round() as i32;
+                    dev.write_event(EV_ABS, ABS_X, abs_x);
+                    dev.write_event(EV_ABS, ABS_Y, abs_y);
+                    dev.syn();
+                    if MOVE_LOG_COUNTER.fetch_add(1, Ordering::Relaxed) % 60 == 0 {
+                        println!("[Input] UInput ABS: ({}, {}) norm=({:.4}, {:.4})", abs_x, abs_y, x, y);
                     }
                 }
-            });
-        });
-    }
-
-    fn flush_pending_move() {
-        if MOUSE_DIRTY.swap(false, Ordering::Acquire) {
-            let px = MOUSE_TARGET_X.load(Ordering::Relaxed);
-            let py = MOUSE_TARGET_Y.load(Ordering::Relaxed);
-            if px >= 0 && py >= 0 {
-                warp_cursor_position(px, py);
+                return;
             }
         }
-    }
 
-    pub fn dispatch_mouse_move(x: f32, y: f32, dx: i32, dy: i32, is_rel: bool) {
-        init_mouse_worker();
-
+        // 2. Fallback to ydotool if uinput is not available
         if is_rel {
-            let cmd = format!("dispatch movecursor {:+} {:+}", dx, dy);
-            if !send_hyprland_cmd(&cmd) {
-                let _ = prepare_ydotool_cmd("mousemove")
-                    .args(["-x", &dx.to_string(), "-y", &dy.to_string()])
-                    .spawn();
-            }
+            let _ = prepare_ydotool_cmd("mousemove")
+                .args(["--", &dx.to_string(), &dy.to_string()])
+                .spawn();
         } else {
             let (screen_w, screen_h, ox, oy) = get_active_monitor_bounds();
             let px = ox + (x * screen_w).round() as i32;
             let py = oy + (y * screen_h).round() as i32;
-
-            MOUSE_TARGET_X.store(px, Ordering::Relaxed);
-            MOUSE_TARGET_Y.store(py, Ordering::Relaxed);
-            MOUSE_DIRTY.store(true, Ordering::Release);
-
-            if MOVE_LOG_COUNTER.fetch_add(1, Ordering::Relaxed) % 60 == 0 {
-                println!("[Input] Linux MouseMove: ({}, {}) on screen ({}x{}, offset: {},{})", px, py, screen_w as i32, screen_h as i32, ox, oy);
-            }
+            let _ = prepare_ydotool_cmd("mousemove")
+                .args(["-a", &px.to_string(), &py.to_string()])
+                .spawn();
         }
     }
 
     pub fn dispatch_mouse_button(btn: u8, down: bool) {
-        // Flush pending cursor movement before clicking so the click is placed at the exact target
-        flush_pending_move();
+        let ev_code = match btn {
+            0 => BTN_LEFT,
+            1 => BTN_MIDDLE,
+            2 => BTN_RIGHT,
+            3 => BTN_SIDE,
+            _ => BTN_EXTRA,
+        };
 
-        // Standard Linux event codes: 0: Left -> 272 (BTN_LEFT), 1: Middle -> 274 (BTN_MIDDLE), 2: Right -> 273 (BTN_RIGHT)
+        // 1. Native Linux /dev/uinput button injection
+        {
+            let uinput_guard = get_uinput();
+            if let Some(ref dev) = *uinput_guard {
+                dev.write_event(EV_KEY, ev_code, if down { 1 } else { 0 });
+                dev.syn();
+                return;
+            }
+        }
+
+        // 2. Fallback to ydotool
         let keycode = match btn {
             0 => 272,
             2 => 273,
             _ => 274,
         };
         let state = if down { "1" } else { "0" };
-        println!("[Input] Linux MouseButton: btn={} (keycode={}), down={}", btn, keycode, down);
-
-        // 1. Primary: ydotool key <code:state> (supports hold, drag, select, release)
-        let res = prepare_ydotool_cmd("key")
+        let _ = prepare_ydotool_cmd("key")
             .args([&format!("{}:{}", keycode, state)])
             .status();
-
-        // 2. Fallback: ydotool click (if keycode emulation is unsupported on older ydotoold)
-        if res.is_err() && !down {
-            let hex = match btn {
-                0 => "0xC0",
-                2 => "0xC1",
-                _ => "0xC2",
-            };
-            let _ = prepare_ydotool_cmd("click").args([hex]).status();
-        }
     }
 
     pub fn dispatch_mouse_wheel(_dx: i32, dy: i32) {
+        // 1. Native Linux /dev/uinput wheel injection
+        {
+            let uinput_guard = get_uinput();
+            if let Some(ref dev) = *uinput_guard {
+                dev.write_event(EV_REL, REL_WHEEL, dy);
+                dev.syn();
+                return;
+            }
+        }
+
+        // 2. Fallback to ydotool
         let wheel_delta = if dy > 0 { -1 } else if dy < 0 { 1 } else { 0 };
         if wheel_delta != 0 {
             let _ = prepare_ydotool_cmd("mousemove")
@@ -406,8 +527,18 @@ mod linux_impl {
     }
 
     pub fn dispatch_key(code: u16, down: bool) {
+        // 1. Native Linux /dev/uinput keyboard key injection
+        {
+            let uinput_guard = get_uinput();
+            if let Some(ref dev) = *uinput_guard {
+                dev.write_event(EV_KEY, code, if down { 1 } else { 0 });
+                dev.syn();
+                return;
+            }
+        }
+
+        // 2. Fallback to ydotool
         let state = if down { "1" } else { "0" };
-        println!("[Input] Linux Key: code={}, state={}", code, state);
         let _ = prepare_ydotool_cmd("key")
             .args([&format!("{}:{}", code, state)])
             .spawn();

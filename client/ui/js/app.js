@@ -331,13 +331,28 @@ class HyprRemoteUnifiedApp {
     };
 
     sourceBuffer.addEventListener('updateend', () => {
-      // Auto-chase live edge to maintain ultra-low latency (<30ms)
+      // Auto-chase live edge with adaptive playbackRate to eliminate decoder stutter & lag
       if (video.buffered.length > 0) {
         const end = video.buffered.end(video.buffered.length - 1);
-        if (end - video.currentTime > 0.12) {
-          video.currentTime = end - 0.02;
+        const delay = end - video.currentTime;
+        if (delay > 0.35) {
+          // Major lag (e.g. initial connection, window switch, or network hiccup)
+          video.currentTime = Math.max(0, end - 0.03);
+        } else if (delay > 0.08) {
+          // Smoothly catch up without micro-freezing or dropping frames
+          video.playbackRate = 1.06;
+        } else if (delay < 0.03) {
+          video.playbackRate = 1.0;
         }
       }
+
+      // Memory management: prune old buffered video segments > 4s in the past
+      if (!sourceBuffer.updating && video.currentTime > 8) {
+        try {
+          sourceBuffer.remove(0, video.currentTime - 4);
+        } catch (_) {}
+      }
+
       flushQueue();
     });
 
@@ -651,53 +666,23 @@ class HyprRemoteUnifiedApp {
     const rect = el.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return null;
 
-    if (this.isStretched) {
-      const cx = e.clientX - rect.left;
-      const cy = e.clientY - rect.top;
-      return {
-        x: Math.max(0, Math.min(1, cx / rect.width)),
-        y: Math.max(0, Math.min(1, cy / rect.height)),
-      };
-    }
+    const cx = e.clientX - rect.left;
+    const cy = e.clientY - rect.top;
 
-    const nw = this.remoteWidth || el.videoWidth || el.naturalWidth || el.width || 1920;
-    const nh = this.remoteHeight || el.videoHeight || el.naturalHeight || el.height || 1080;
-    const rectRatio = rect.width / rect.height;
-    const imgRatio = nw / nh;
-
-    let rw = rect.width;
-    let rh = rect.height;
-    let ox = 0;
-    let oy = 0;
-
-    // Compensate if element aspect ratio differs from image aspect ratio by > 1%
-    if (Math.abs(rectRatio - imgRatio) > 0.01) {
-      if (rectRatio > imgRatio) {
-        rw = rect.height * imgRatio;
-        ox = (rect.width - rw) / 2;
-      } else {
-        rh = rect.width / imgRatio;
-        oy = (rect.height - rh) / 2;
-      }
-    }
-
-    const cx = e.clientX - rect.left - ox;
-    const cy = e.clientY - rect.top - oy;
-
-    if (!e.buttons && (cx < 0 || cx > rw || cy < 0 || cy > rh)) {
+    if (!e.buttons && (cx < 0 || cx > rect.width || cy < 0 || cy > rect.height)) {
       return null;
     }
 
     return {
-      x: Math.max(0, Math.min(1, cx / rw)),
-      y: Math.max(0, Math.min(1, cy / rh)),
+      x: Math.max(0, Math.min(1, cx / rect.width)),
+      y: Math.max(0, Math.min(1, cy / rect.height)),
     };
   }
 
   onMouseMove(e) {
     const now = performance.now();
-    // Cap mouse movement rate to ~70 FPS (14ms) for butter-smooth tracking without TCP saturation
-    if (now - this.lastInputTime < 14) return;
+    // Cap mouse movement rate to ~100 FPS (10ms) for butter-smooth tracking without lag
+    if (now - this.lastInputTime < 10) return;
     this.lastInputTime = now;
 
     if (this.isPointerLocked) {
