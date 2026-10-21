@@ -39,7 +39,7 @@ class HyprRemoteUnifiedApp {
       statFps: document.getElementById('stat-fps'),
       statLatency: document.getElementById('stat-latency'),
       btnToggleQuality: document.getElementById('btn-toggle-quality'),
-      btnToggleRes: document.getElementById('btn-toggle-res'),
+      selectResolution: document.getElementById('select-resolution'),
       btnToggleScale: document.getElementById('btn-toggle-scale'),
       btnToggleFs: document.getElementById('btn-toggle-fs'),
       btnToggleLock: document.getElementById('btn-toggle-lock'),
@@ -47,7 +47,6 @@ class HyprRemoteUnifiedApp {
     };
 
     this.scaleMode = 'fit'; // 'fit' (等比自适应), 'native' (1:1 原生点对点), 'stretch' (全屏铺满)
-    this.currentResIdx = 0;
     this.isH264Active = false;
     this.h264AbortController = null;
     this.currentQualityIdx = 0;
@@ -133,8 +132,8 @@ class HyprRemoteUnifiedApp {
       this.dom.btnToggleQuality.addEventListener('click', () => this.toggleQualityMode());
     }
 
-    if (this.dom.btnToggleRes) {
-      this.dom.btnToggleRes.addEventListener('click', () => this.toggleResolutionMode());
+    if (this.dom.selectResolution) {
+      this.dom.selectResolution.addEventListener('change', (e) => this.setResolution(e.target.value));
     }
 
     if (this.dom.btnToggleScale) {
@@ -648,29 +647,18 @@ class HyprRemoteUnifiedApp {
     this._updateCanvasLayout();
   }
 
-  async toggleResolutionMode() {
+  async setResolution(res) {
     if (!this.activeSession) return;
-    const resOptions = [
-      { id: '2560x1440', label: '🖥️ 分辨率: 2K (1440P)' },
-      { id: '1920x1080', label: '🖥️ 分辨率: 1080P' },
-      { id: 'preferred', label: '🖥️ 分辨率: 默认推荐' },
-    ];
-    this.currentResIdx = ((this.currentResIdx || 0) + 1) % resOptions.length;
-    const opt = resOptions[this.currentResIdx];
-    if (this.dom.btnToggleRes) {
-      this.dom.btnToggleRes.textContent = opt.label;
-    }
-
     try {
-      const url = `http://${this.activeSession.ip}:${this.activeSession.port}/set_resolution?res=${opt.id}`;
+      const url = `http://${this.activeSession.ip}:${this.activeSession.port}/set_resolution?res=${res}`;
       await fetch(url, { method: 'POST' });
-      // If H264 was active, briefly wait for Hyprland to resize and reconnect
+      // If H264 was active, give host 450ms to configure virtual display and restart stream
       if (this.isH264Active) {
         setTimeout(() => {
           if (this.sessionRunning && this.activeSession) {
             this._startH264Stream().catch(() => this._startStreamLoop());
           }
-        }, 400);
+        }, 450);
       }
     } catch (e) {
       console.warn('Failed to set remote resolution:', e);
@@ -777,7 +765,13 @@ class HyprRemoteUnifiedApp {
   // Input Handling
   // ==========================================
   _attachInput() {
-    [this.dom.remoteVideo, this.dom.remoteCanvas, this.dom.remoteImg].forEach((target) => {
+    const targets = [
+      this.dom.remoteVideo,
+      this.dom.remoteCanvas,
+      this.dom.remoteImg,
+      document.getElementById('screen-viewport'),
+    ];
+    targets.forEach((target) => {
       if (!target) return;
       target.addEventListener('mousemove', this.onMouseMove);
       target.addEventListener('mousedown', this.onMouseDown);
@@ -787,10 +781,17 @@ class HyprRemoteUnifiedApp {
 
     window.addEventListener('keydown', this.onKeyDown);
     window.addEventListener('keyup', this.onKeyUp);
+    window.addEventListener('mouseup', this.onMouseUp);
   }
 
   _detachInput() {
-    [this.dom.remoteVideo, this.dom.remoteCanvas, this.dom.remoteImg].forEach((target) => {
+    const targets = [
+      this.dom.remoteVideo,
+      this.dom.remoteCanvas,
+      this.dom.remoteImg,
+      document.getElementById('screen-viewport'),
+    ];
+    targets.forEach((target) => {
       if (!target) return;
       target.removeEventListener('mousemove', this.onMouseMove);
       target.removeEventListener('mousedown', this.onMouseDown);
@@ -800,6 +801,7 @@ class HyprRemoteUnifiedApp {
 
     window.removeEventListener('keydown', this.onKeyDown);
     window.removeEventListener('keyup', this.onKeyUp);
+    window.removeEventListener('mouseup', this.onMouseUp);
 
     if (this.isPointerLocked) document.exitPointerLock?.();
   }

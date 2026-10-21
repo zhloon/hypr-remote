@@ -483,28 +483,7 @@ mod linux_impl {
     }
 
     pub fn dispatch_mouse_move(x: f32, y: f32, dx: i32, dy: i32, is_rel: bool) {
-        // Priority 1: Direct Hyprland compositor socket warp (< 0.02ms, 0 processes, 100% pixel-perfect)
-        if !is_rel {
-            if let Some(sock_path) = find_hyprland_socket() {
-                let (screen_w, screen_h, ox, oy) = get_active_monitor_bounds();
-                let px = ox + (x * screen_w).round() as i32;
-                let py = oy + (y * screen_h).round() as i32;
-                let cmd = format!("[[BATCH]]dispatch movecursor {} {}\n", px, py);
-                use std::os::unix::net::UnixStream;
-                use std::io::Write;
-                if let Ok(mut sock) = UnixStream::connect(&sock_path) {
-                    if sock.write_all(cmd.as_bytes()).is_ok() {
-                        if MOVE_LOG_COUNTER.fetch_add(1, Ordering::Relaxed) % 120 == 0 {
-                            println!("[Input/Hyprland] movecursor {} {} (norm: {:.3}, {:.3}, bounds: {}x{}+{}+{})",
-                                px, py, x, y, screen_w, screen_h, ox, oy);
-                        }
-                        return;
-                    }
-                }
-            }
-        }
-
-        // Priority 2: Native Linux /dev/uinput absolute or relative pointer (< 0.05ms)
+        // Priority 1: Native Linux /dev/uinput absolute or relative pointer (< 0.05ms)
         {
             let uinput_guard = get_uinput();
             if let Some(ref dev) = *uinput_guard {
@@ -526,7 +505,7 @@ mod linux_impl {
             }
         }
 
-        // Priority 3: Coalesced fallback worker via ydotool
+        // Priority 2: Coalesced fallback worker via ydotool / hyprctl
         submit_coalesced_mouse_move(x, y, dx, dy, is_rel);
     }
 
@@ -564,9 +543,14 @@ mod linux_impl {
                                 let (screen_w, screen_h, ox, oy) = get_active_monitor_bounds();
                                 let px = ox + (x * screen_w).round() as i32;
                                 let py = oy + (y * screen_h).round() as i32;
-                                let _ = prepare_ydotool_cmd("mousemove")
+                                let ydo_res = prepare_ydotool_cmd("mousemove")
                                     .args(["-a", &px.to_string(), &py.to_string()])
                                     .status();
+                                if ydo_res.is_err() || !ydo_res.unwrap().success() {
+                                    let _ = std::process::Command::new("hyprctl")
+                                        .args(["dispatch", "movecursor", &format!("{},{}", px, py)])
+                                        .status();
+                                }
                             }
                         } else {
                             WORKER_RUNNING.store(false, Ordering::SeqCst);

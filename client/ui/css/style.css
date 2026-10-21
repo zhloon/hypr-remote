@@ -434,6 +434,26 @@ body {
   border-color: var(--danger);
 }
 
+.tool-select {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--border);
+  color: var(--text-main);
+  padding: 4px 10px;
+  border-radius: 16px;
+  font-size: 12px;
+  cursor: pointer;
+  outline: none;
+  font-family: inherit;
+  transition: background 0.15s ease;
+}
+.tool-select:hover {
+  background: rgba(255, 255, 255, 0.18);
+}
+.tool-select option {
+  background: #121622;
+  color: #fff;
+}
+
 .screen-viewport {
   width: 100vw;
   height: 100vh;

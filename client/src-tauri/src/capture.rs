@@ -166,30 +166,32 @@ pub fn spawn_h264_recorder_process() -> Result<tokio::process::Child, std::io::E
     // Kill any lingering recorder instance to ensure clean port/device access
     let _ = std::process::Command::new("pkill").arg("-x").arg("wf-recorder").status();
 
-    let mon_name = detect_focused_monitor();
+    let mon_name = {
+        let active = ACTIVE_MONITOR_NAME.lock().ok().and_then(|g| g.clone());
+        active.or_else(detect_focused_monitor)
+    };
     let out_flag = match mon_name {
         Some(ref m) => format!("-o {}", m),
         None => "".to_string(),
     };
 
     let (hw_args, has_hw) = if std::path::Path::new("/proc/driver/nvidia/version").exists() {
-        println!("[H264/GPU] Detected NVIDIA GPU -> Using h264_nvenc (Hardware Acceleration, 60fps, 50M, Crystal-Clarity)");
-        ("-c h264_nvenc -p preset=p4 -p tune=ull -p b=50M -p g=15 -b 0", true)
+        println!("[H264/GPU] Detected NVIDIA GPU -> Using h264_nvenc (Hardware Acceleration, 60fps, 35M, Crystal-Clarity)");
+        ("-c h264_nvenc -p preset=p4 -p tune=ull -p b=35M -p g=30 -p bf=0", true)
     } else if std::path::Path::new("/dev/dri/renderD128").exists() {
-        println!("[H264/GPU] Detected VA-API GPU (/dev/dri/renderD128) -> Using h264_vaapi (Hardware Acceleration, 60fps, 50M, Crystal-Clarity)");
-        ("-c h264_vaapi -d /dev/dri/renderD128 -p b=50M -p g=15 -b 0", true)
+        println!("[H264/GPU] Detected VA-API GPU (/dev/dri/renderD128) -> Using h264_vaapi (Hardware Acceleration, 60fps, 35M, Crystal-Clarity)");
+        ("-c h264_vaapi -d /dev/dri/renderD128 -p b=35M -p g=30 -p bf=0", true)
     } else if std::path::Path::new("/dev/dri/renderD129").exists() {
-        println!("[H264/GPU] Detected VA-API GPU (/dev/dri/renderD129) -> Using h264_vaapi (Hardware Acceleration, 60fps, 50M, Crystal-Clarity)");
-        ("-c h264_vaapi -d /dev/dri/renderD129 -p b=50M -p g=15 -b 0", true)
+        println!("[H264/GPU] Detected VA-API GPU (/dev/dri/renderD129) -> Using h264_vaapi (Hardware Acceleration, 60fps, 35M, Crystal-Clarity)");
+        ("-c h264_vaapi -d /dev/dri/renderD129 -p b=35M -p g=30 -p bf=0", true)
     } else {
-        println!("[H264/CPU] No dedicated hardware encoder node -> Using libx264 ultrafast (CRF 14, 60fps, 50M)");
-        ("-c libx264 -p preset=ultrafast -p tune=zerolatency -p crf=14 -p b=50M -p g=15 -b 0", false)
+        println!("[H264/CPU] No dedicated hardware encoder node -> Using libx264 ultrafast (CRF 16, 60fps, 30M)");
+        ("-c libx264 -p preset=ultrafast -p tune=zerolatency -p crf=16 -p b=30M -p g=30 -p bf=0", false)
     };
 
-    let cpu_fallback = "-c libx264 -p preset=ultrafast -p tune=zerolatency -p crf=16 -p b=35M -p g=15 -b 0";
+    let cpu_fallback = "-c libx264 -p preset=ultrafast -p tune=zerolatency -p crf=18 -p b=25M -p g=30 -p bf=0";
 
-    // Continuous 60fps stream with -D (no-damage), overwrite (-y), zero b-frames (-b 0), and instant packet flush!
-    // If hardware acceleration fails, auto-fallback to CPU libx264 ultrafast!
+    // Continuous 60fps stream with -D (no-damage), overwrite (-y), zero b-frames (-p bf=0), and instant packet flush!
     let wf_cmd = if has_hw {
         format!(
             "(wf-recorder -D -y {} -m matroska -x yuv420p -r 60 {} -f - 2>/dev/null || wf-recorder -D -y {} -m matroska -x yuv420p -r 60 {} -f -)",
@@ -203,7 +205,7 @@ pub fn spawn_h264_recorder_process() -> Result<tokio::process::Child, std::io::E
     };
 
     let pipeline = format!(
-        "{} | ffmpeg -hide_banner -loglevel error -flush_packets 1 -f matroska -i - -c:v copy -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof -min_frag_duration 33333 -frag_duration 33333 -",
+        "{} | ffmpeg -hide_banner -loglevel error -flush_packets 1 -f matroska -i - -c:v copy -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof -",
         wf_cmd
     );
 
@@ -227,27 +229,61 @@ pub fn spawn_h264_recorder_process() -> Result<tokio::process::Child, std::io::E
 
 #[cfg(target_os = "linux")]
 pub fn set_screen_resolution(res: &str) -> bool {
-    let mon = detect_focused_monitor().unwrap_or_else(|| "eDP-1".to_string());
-    let mon_arg = if res == "auto" || res == "preferred" {
-        format!("{},preferred,auto,1", mon)
-    } else {
-        format!("{},{}@60,auto,1", mon, res)
-    };
-    println!("[Hyprland] Setting monitor resolution: hyprctl keyword monitor {}", mon_arg);
-    let status = std::process::Command::new("hyprctl")
+    if res == "physical" || res == "auto" || res == "preferred" {
+        println!("[Hyprland] Reverting to physical monitor");
+        let _ = std::process::Command::new("hyprctl")
+            .args(["output", "remove", "HEADLESS-1"])
+            .status();
+
+        if let Ok(mut lock) = ACTIVE_MONITOR_NAME.lock() {
+            *lock = None;
+        }
+
+        let mon = detect_focused_monitor().unwrap_or_else(|| "eDP-1".to_string());
+        println!("[Hyprland] Active physical monitor: {}", mon);
+        let _ = std::process::Command::new("hyprctl")
+            .args(["keyword", "device[hyprremote-virtual-device]:output", &mon])
+            .status();
+
+        let _ = std::process::Command::new("pkill").arg("-x").arg("wf-recorder").status();
+        return true;
+    }
+
+    println!("[Hyprland] Creating virtual headless display with resolution: {}", res);
+
+    // 1. Create headless output (HEADLESS-1)
+    let _ = std::process::Command::new("hyprctl")
+        .args(["output", "create", "headless", "HEADLESS-1"])
+        .status();
+
+    // 2. Configure headless monitor resolution (e.g. HEADLESS-1,2560x1440@60,auto,1)
+    let mon_arg = format!("HEADLESS-1,{}@60,auto,1", res);
+    let _ = std::process::Command::new("hyprctl")
         .args(["keyword", "monitor", &mon_arg])
         .status();
 
-    // Restart wf-recorder to capture at new native resolution
-    let _ = std::process::Command::new("pkill").arg("-x").arg("wf-recorder").status();
+    // 3. Set active monitor to HEADLESS-1
+    if let Ok(mut lock) = ACTIVE_MONITOR_NAME.lock() {
+        *lock = Some("HEADLESS-1".to_string());
+    }
 
-    match status {
-        Ok(s) => s.success(),
-        Err(e) => {
-            eprintln!("[Hyprland] Failed to set resolution: {}", e);
-            false
+    // 4. Update screen width & height
+    if let Some((w_str, h_str)) = res.split_once('x') {
+        if let (Ok(w), Ok(h)) = (w_str.parse::<u32>(), h_str.parse::<u32>()) {
+            CURRENT_SCREEN_WIDTH.store(w, Ordering::Relaxed);
+            CURRENT_SCREEN_HEIGHT.store(h, Ordering::Relaxed);
         }
     }
+
+    // 5. Bind virtual uinput mouse device directly to HEADLESS-1
+    let _ = std::process::Command::new("hyprctl")
+        .args(["keyword", "device[hyprremote-virtual-device]:output", "HEADLESS-1"])
+        .status();
+
+    // 6. Restart wf-recorder to capture HEADLESS-1 at the new resolution
+    let _ = std::process::Command::new("pkill").arg("-x").arg("wf-recorder").status();
+
+    true
 }
 
 #[cfg(not(target_os = "linux"))]
