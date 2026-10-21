@@ -434,7 +434,7 @@ class HyprRemoteUnifiedApp {
 
     const h264Watchdog = setTimeout(() => {
       if (!hasPlayed && this.sessionRunning && !this.isH264Active) {
-        console.warn('H.264 stream watchdog timeout (4.5s), auto-falling back to Canvas stream loop');
+        console.warn('H.264 stream watchdog timeout (7s), auto-falling back to Canvas stream loop');
         if (this.h264AbortController) {
           this.h264AbortController.abort();
           this.h264AbortController = null;
@@ -445,7 +445,7 @@ class HyprRemoteUnifiedApp {
         }
         this._startStreamLoop();
       }
-    }, 4500);
+    }, 7000);
 
     video.onplaying = () => {
       hasPlayed = true;

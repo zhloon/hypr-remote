@@ -184,7 +184,7 @@ pub fn spawn_h264_recorder_process() -> Result<tokio::process::Child, std::io::E
 
     let (hw_args, has_hw) = if std::path::Path::new("/proc/driver/nvidia/version").exists() {
         println!("[H264/GPU] Detected NVIDIA GPU -> Using h264_nvenc (Hardware Acceleration, 60fps, Ultra-Low Latency)");
-        ("-c h264_nvenc -b 0 -p preset=ll -p g=15", true)
+        ("-c h264_nvenc -b 0 -p preset=p1 -p tune=ull -p g=15", true)
     } else if std::path::Path::new("/dev/dri/renderD128").exists() {
         println!("[H264/GPU] Detected VA-API GPU (/dev/dri/renderD128) -> Using h264_vaapi (Hardware Acceleration, 60fps, Zero-Copy)");
         ("-c h264_vaapi -d /dev/dri/renderD128 -b 0 -p g=15", true)
@@ -201,14 +201,20 @@ pub fn spawn_h264_recorder_process() -> Result<tokio::process::Child, std::io::E
     let primary_wf = format!("wf-recorder -D -y {} -m mpegts -r 60 {} -f /dev/stdout", out_flag, hw_args);
     let cpu_wf = format!("wf-recorder -D -y {} -m mpegts -r 60 {} -f /dev/stdout", out_flag, cpu_fallback);
 
-    let wf_cmd = if has_hw {
+    let is_nvidia = std::path::Path::new("/proc/driver/nvidia/version").exists();
+    let wf_cmd = if is_nvidia {
+        let nv_p1 = format!("wf-recorder -D -y {} -m mpegts -r 60 -c h264_nvenc -b 0 -p preset=p1 -p tune=ull -p g=15 -f /dev/stdout", out_flag);
+        let nv_fast = format!("wf-recorder -D -y {} -m mpegts -r 60 -c h264_nvenc -b 0 -p preset=fast -p g=15 -f /dev/stdout", out_flag);
+        let nv_basic = format!("wf-recorder -D -y {} -m mpegts -r 60 -c h264_nvenc -b 0 -p g=15 -f /dev/stdout", out_flag);
+        format!("({} || {} || {} || {})", nv_p1, nv_fast, nv_basic, cpu_wf)
+    } else if has_hw {
         format!("({} || {})", primary_wf, cpu_wf)
     } else {
         cpu_wf
     };
 
     let pipeline = format!(
-        "{} | ffmpeg -hide_banner -loglevel warning -flush_packets 1 -fflags nobuffer -flags low_delay -probesize 32768 -analyzeduration 0 -f mpegts -i - -c:v copy -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof -frag_duration 16666 -",
+        "{} | ffmpeg -hide_banner -loglevel warning -flush_packets 1 -fflags nobuffer -flags low_delay -probesize 65536 -analyzeduration 100000 -f mpegts -i - -c:v copy -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof -frag_duration 16666 -",
         wf_cmd
     );
 
