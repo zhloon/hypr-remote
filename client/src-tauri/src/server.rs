@@ -302,6 +302,41 @@ impl EmbeddedHostServer {
             );
             let _ = stream.write_all(response.as_bytes()).await;
         }
+        // 5.2 Bi-directional Shared Clipboard: GET or POST /clipboard
+        else if method == "GET" && path.starts_with("/clipboard") {
+            let content = crate::clipboard::get_os_clipboard();
+            let body = serde_json::json!({ "content": content }).to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\n\
+                Content-Type: application/json; charset=utf-8\r\n\
+                Access-Control-Allow-Origin: *\r\n\
+                Content-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+        }
+        else if method == "POST" && path.starts_with("/clipboard") {
+            let body = if let Some(pos) = request_str.find("\r\n\r\n") {
+                &request_str[pos + 4..]
+            } else {
+                ""
+            };
+            let text_to_set = if let Ok(val) = serde_json::from_str::<serde_json::Value>(body) {
+                val["content"].as_str().unwrap_or(body).to_string()
+            } else {
+                body.to_string()
+            };
+            if !text_to_set.is_empty() {
+                crate::clipboard::set_os_clipboard(&text_to_set);
+            }
+            let response = "HTTP/1.1 200 OK\r\n\
+                Content-Type: application/json\r\n\
+                Access-Control-Allow-Origin: *\r\n\
+                Content-Length: 15\r\n\r\n\
+                {\"status\":\"ok\"}";
+            let _ = stream.write_all(response.as_bytes()).await;
+        }
         // 6. Ultra-Low-Latency Hardware H.264 Video Stream: GET /h264_stream
         else if method == "GET" && path.starts_with("/h264_stream") {
             let mut child = match crate::capture::spawn_h264_recorder_process() {

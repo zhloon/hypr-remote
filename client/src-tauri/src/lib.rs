@@ -1,4 +1,5 @@
 pub mod capture;
+pub mod clipboard;
 pub mod discovery;
 pub mod input;
 pub mod server;
@@ -157,6 +158,16 @@ async fn send_input_to_remote(
     Ok(())
 }
 
+#[tauri::command]
+fn get_local_clipboard() -> String {
+    clipboard::get_os_clipboard()
+}
+
+#[tauri::command]
+fn set_local_clipboard(content: String) -> bool {
+    clipboard::set_os_clipboard(&content)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let port = 18080;
@@ -188,6 +199,8 @@ pub fn run() {
             resolve_connection_code,
             toggle_fullscreen,
             send_input_to_remote,
+            get_local_clipboard,
+            set_local_clipboard,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

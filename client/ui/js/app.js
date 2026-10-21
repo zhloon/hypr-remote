@@ -39,17 +39,18 @@ class HyprRemoteUnifiedApp {
       statFps: document.getElementById('stat-fps'),
       statLatency: document.getElementById('stat-latency'),
       btnToggleQuality: document.getElementById('btn-toggle-quality'),
-      selectResolution: document.getElementById('select-resolution'),
-      btnToggleScale: document.getElementById('btn-toggle-scale'),
+      btnSyncClipboard: document.getElementById('btn-sync-clipboard'),
       btnToggleFs: document.getElementById('btn-toggle-fs'),
-      btnToggleLock: document.getElementById('btn-toggle-lock'),
       btnDisconnect: document.getElementById('btn-disconnect'),
     };
 
-    this.scaleMode = 'fit'; // 'fit' (等比自适应), 'native' (1:1 原生点对点), 'stretch' (全屏铺满)
+    this.scaleMode = 'fit'; // Default standard aspect-ratio fit
     this.isH264Active = false;
     this.h264AbortController = null;
     this.currentQualityIdx = 0;
+    this.lastLocalClipboard = '';
+    this.lastRemoteClipboard = '';
+    this.clipboardTimer = null;
 
     this.ctx = this.dom.remoteCanvas ? this.dom.remoteCanvas.getContext('2d', { alpha: false }) : null;
 
@@ -126,29 +127,14 @@ class HyprRemoteUnifiedApp {
     // Session controls
     this.dom.btnDisconnect.addEventListener('click', () => this.disconnect());
     this.dom.btnToggleFs.addEventListener('click', () => this.toggleFullscreen());
-    this.dom.btnToggleLock.addEventListener('click', () => this.togglePointerLock());
 
     if (this.dom.btnToggleQuality) {
       this.dom.btnToggleQuality.addEventListener('click', () => this.toggleQualityMode());
     }
 
-    if (this.dom.selectResolution) {
-      this.dom.selectResolution.addEventListener('change', (e) => this.setResolution(e.target.value));
+    if (this.dom.btnSyncClipboard) {
+      this.dom.btnSyncClipboard.addEventListener('click', () => this.syncClipboard(true));
     }
-
-    if (this.dom.btnToggleScale) {
-      this.dom.btnToggleScale.addEventListener('click', () => this.toggleScaleMode());
-    }
-
-    // Pointer lock listener
-    document.addEventListener('pointerlockchange', () => {
-      this.isPointerLocked =
-        document.pointerLockElement === this.dom.remoteVideo ||
-        document.pointerLockElement === this.dom.remoteCanvas ||
-        document.pointerLockElement === this.dom.remoteImg;
-      this.dom.btnToggleLock.classList.toggle('active', this.isPointerLocked);
-      this.dom.btnToggleLock.textContent = this.isPointerLocked ? '释放光标 (Esc)' : '锁定光标';
-    });
 
     // Fullscreen listener via F11 or Esc
     window.addEventListener('keydown', (e) => {
@@ -265,6 +251,9 @@ class HyprRemoteUnifiedApp {
 
       // Attach input listeners
       this._attachInput();
+
+      // Start bi-directional shared clipboard sync
+      this._startClipboardSync();
     } catch (err) {
       console.error('Connection error:', err);
       alert('连接异常: ' + err);
@@ -580,6 +569,7 @@ class HyprRemoteUnifiedApp {
     this.sessionRunning = false;
     this.isH264Active = false;
     this.isStreamLoopRunning = false;
+    this._stopClipboardSync();
     if (this.h264AbortController) {
       this.h264AbortController.abort();
       this.h264AbortController = null;
@@ -627,49 +617,88 @@ class HyprRemoteUnifiedApp {
     this.dom.btnToggleFs.classList.toggle('active', this.isFullscreen);
   }
 
-  toggleScaleMode() {
-    const modes = ['fit', 'native', 'stretch'];
-    const curIdx = modes.indexOf(this.scaleMode);
-    this.scaleMode = modes[(curIdx + 1) % modes.length];
-
-    const elements = [this.dom.remoteVideo, this.dom.remoteCanvas, this.dom.remoteImg];
-    elements.forEach((el) => {
-      if (!el) return;
-      el.classList.remove('scale-native', 'scale-stretch');
-      if (this.scaleMode === 'native') el.classList.add('scale-native');
-      if (this.scaleMode === 'stretch') el.classList.add('scale-stretch');
-    });
-
-    if (this.dom.btnToggleScale) {
-      if (this.scaleMode === 'fit') {
-        this.dom.btnToggleScale.textContent = '📐 缩放: 等比自适应';
-        this.dom.btnToggleScale.classList.remove('active');
-      } else if (this.scaleMode === 'native') {
-        this.dom.btnToggleScale.textContent = '🎯 缩放: 1:1 原生点对点';
-        this.dom.btnToggleScale.classList.add('active');
-      } else {
-        this.dom.btnToggleScale.textContent = '↔️ 缩放: 全屏铺满';
-        this.dom.btnToggleScale.classList.add('active');
+  _startClipboardSync() {
+    this._stopClipboardSync();
+    this.syncClipboard(false);
+    this.clipboardTimer = setInterval(() => {
+      if (this.sessionRunning && this.activeSession) {
+        this.syncClipboard(false);
       }
-    }
-    this._updateCanvasLayout();
+    }, 600);
   }
 
-  async setResolution(res) {
-    if (!this.activeSession) return;
+  _stopClipboardSync() {
+    if (this.clipboardTimer) {
+      clearInterval(this.clipboardTimer);
+      this.clipboardTimer = null;
+    }
+  }
+
+  async syncClipboard(forceFeedback = false) {
+    if (!this.sessionRunning || !this.activeSession) return;
+
     try {
-      const url = `http://${this.activeSession.ip}:${this.activeSession.port}/set_resolution?res=${res}`;
-      await fetch(url, { method: 'POST' });
-      // If H264 was active, give host 450ms to configure virtual display and restart stream
-      if (this.isH264Active) {
-        setTimeout(() => {
-          if (this.sessionRunning && this.activeSession) {
-            this._startH264Stream().catch(() => this._startStreamLoop());
+      // 1. Read local clipboard
+      let localText = '';
+      if (this.isTauri) {
+        try {
+          localText = await window.__TAURI__.core.invoke('get_local_clipboard');
+        } catch (_) {}
+      } else if (navigator.clipboard?.readText) {
+        try {
+          localText = await navigator.clipboard.readText();
+        } catch (_) {}
+      }
+
+      // 2. If local clipboard has changed, push to remote host
+      if (localText && localText !== this.lastLocalClipboard && localText !== this.lastRemoteClipboard) {
+        this.lastLocalClipboard = localText;
+        await fetch(`http://${this.activeSession.ip}:${this.activeSession.port}/clipboard`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content: localText }),
+        });
+        if (this.dom.btnSyncClipboard) {
+          this.dom.btnSyncClipboard.textContent = '✅ 已同步到远程';
+          setTimeout(() => {
+            if (this.dom.btnSyncClipboard) this.dom.btnSyncClipboard.textContent = '📋 剪贴板同步';
+          }, 1500);
+        }
+        return;
+      }
+
+      // 3. Otherwise, pull remote clipboard
+      const res = await fetch(`http://${this.activeSession.ip}:${this.activeSession.port}/clipboard`);
+      if (res.ok) {
+        const data = await res.json();
+        const remoteText = data.content || '';
+        if (remoteText && remoteText !== this.lastRemoteClipboard && remoteText !== this.lastLocalClipboard) {
+          this.lastRemoteClipboard = remoteText;
+          if (this.isTauri) {
+            await window.__TAURI__.core.invoke('set_local_clipboard', { content: remoteText });
+          } else if (navigator.clipboard?.writeText) {
+            await navigator.clipboard.writeText(remoteText).catch(() => {});
           }
-        }, 450);
+          if (this.dom.btnSyncClipboard) {
+            this.dom.btnSyncClipboard.textContent = '📥 已拉取自远程';
+            setTimeout(() => {
+              if (this.dom.btnSyncClipboard) this.dom.btnSyncClipboard.textContent = '📋 剪贴板同步';
+            }, 1500);
+          }
+          return;
+        }
+      }
+
+      if (forceFeedback && this.dom.btnSyncClipboard) {
+        this.dom.btnSyncClipboard.textContent = '✅ 内容已一致';
+        setTimeout(() => {
+          if (this.dom.btnSyncClipboard) this.dom.btnSyncClipboard.textContent = '📋 剪贴板同步';
+        }, 1200);
       }
     } catch (e) {
-      console.warn('Failed to set remote resolution:', e);
+      if (forceFeedback) {
+        console.warn('Clipboard sync error:', e);
+      }
     }
   }
 
@@ -719,15 +748,6 @@ class HyprRemoteUnifiedApp {
     return this.dom.remoteImg;
   }
 
-  togglePointerLock() {
-    const el = this._getActiveElement();
-    if (this.isPointerLocked) {
-      document.exitPointerLock?.();
-    } else {
-      el?.requestPointerLock?.();
-    }
-  }
-
   _updateCanvasLayout() {
     const el = this._getActiveElement();
     if (!el) return;
@@ -735,20 +755,7 @@ class HyprRemoteUnifiedApp {
     const nw = this.remoteWidth || el.videoWidth || el.naturalWidth || el.width || 1920;
     const nh = this.remoteHeight || el.videoHeight || el.naturalHeight || el.height || 1080;
 
-    if (this.scaleMode === 'stretch') {
-      el.style.width = '100vw';
-      el.style.height = '100vh';
-      return;
-    }
-
-    if (this.scaleMode === 'native') {
-      // 1:1 pixel-perfect mapping (1080p displayed exactly 1920x1080 on 2K screen without interpolation blur)
-      el.style.width = `${nw}px`;
-      el.style.height = `${nh}px`;
-      return;
-    }
-
-    // Default 'fit' mode: strictly preserve aspect ratio without stretching
+    // Standard aspect-ratio fit
     const viewport = document.querySelector('.screen-viewport');
     const vw = viewport ? viewport.clientWidth : window.innerWidth;
     const vh = viewport ? viewport.clientHeight : window.innerHeight;
@@ -790,6 +797,13 @@ class HyprRemoteUnifiedApp {
     window.addEventListener('keydown', this.onKeyDown);
     window.addEventListener('keyup', this.onKeyUp);
     window.addEventListener('mouseup', this.onMouseUp);
+
+    this._onWindowFocus = () => this.syncClipboard(false);
+    this._onWindowCopy = () => setTimeout(() => this.syncClipboard(false), 50);
+    this._onWindowPaste = () => setTimeout(() => this.syncClipboard(false), 50);
+    window.addEventListener('focus', this._onWindowFocus);
+    window.addEventListener('copy', this._onWindowCopy);
+    window.addEventListener('paste', this._onWindowPaste);
   }
 
   _detachInput() {
@@ -811,7 +825,9 @@ class HyprRemoteUnifiedApp {
     window.removeEventListener('keyup', this.onKeyUp);
     window.removeEventListener('mouseup', this.onMouseUp);
 
-    if (this.isPointerLocked) document.exitPointerLock?.();
+    if (this._onWindowFocus) window.removeEventListener('focus', this._onWindowFocus);
+    if (this._onWindowCopy) window.removeEventListener('copy', this._onWindowCopy);
+    if (this._onWindowPaste) window.removeEventListener('paste', this._onWindowPaste);
   }
 
   _sendInput(msg) {
@@ -865,18 +881,6 @@ class HyprRemoteUnifiedApp {
   }
 
   onMouseMove(e) {
-    if (this.isPointerLocked) {
-      this._sendInput({
-        type: 'MouseMove',
-        x: 0,
-        y: 0,
-        dx: e.movementX,
-        dy: e.movementY,
-        is_rel: true,
-      });
-      return;
-    }
-
     const coords = this._getNormalizedCoords(e);
     if (!coords) return;
 
@@ -904,18 +908,16 @@ class HyprRemoteUnifiedApp {
       cancelAnimationFrame(this._moveRaf);
       this._moveRaf = null;
     }
-    if (!this.isPointerLocked) {
-      const coords = this._getNormalizedCoords(e);
-      if (coords) {
-        this._sendInput({
-          type: 'MouseMove',
-          x: coords.x,
-          y: coords.y,
-          dx: 0,
-          dy: 0,
-          is_rel: false,
-        });
-      }
+    const coords = this._getNormalizedCoords(e);
+    if (coords) {
+      this._sendInput({
+        type: 'MouseMove',
+        x: coords.x,
+        y: coords.y,
+        dx: 0,
+        dy: 0,
+        is_rel: false,
+      });
     }
     this._sendInput({
       type: 'MouseButton',
@@ -929,18 +931,16 @@ class HyprRemoteUnifiedApp {
       cancelAnimationFrame(this._moveRaf);
       this._moveRaf = null;
     }
-    if (!this.isPointerLocked) {
-      const coords = this._getNormalizedCoords(e);
-      if (coords) {
-        this._sendInput({
-          type: 'MouseMove',
-          x: coords.x,
-          y: coords.y,
-          dx: 0,
-          dy: 0,
-          is_rel: false,
-        });
-      }
+    const coords = this._getNormalizedCoords(e);
+    if (coords) {
+      this._sendInput({
+        type: 'MouseMove',
+        x: coords.x,
+        y: coords.y,
+        dx: 0,
+        dy: 0,
+        is_rel: false,
+      });
     }
     this._sendInput({
       type: 'MouseButton',
