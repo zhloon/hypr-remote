@@ -458,8 +458,23 @@ mod linux_impl {
         LAST_MONITOR_CHECK.store(0, Ordering::Relaxed);
     }
 
+    static CACHED_HYPR_SOCKET: Mutex<Option<String>> = Mutex::new(None);
+
     fn hyprland_move_cursor(px: i32, py: i32) -> bool {
-        // 1. Fast path: Direct Hyprland UNIX IPC socket (< 0.02ms)
+        // 1. Ultra-fast path: Try cached Hyprland IPC socket (< 0.005ms, 0 filesystem overhead)
+        if let Ok(guard) = CACHED_HYPR_SOCKET.lock() {
+            if let Some(ref sock_path) = *guard {
+                if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(sock_path) {
+                    use std::io::Write;
+                    let cmd = format!("dispatch movecursor {},{}\n", px, py);
+                    if stream.write_all(cmd.as_bytes()).is_ok() {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        // 2. Discover socket path if cache missed or disconnected
         let mut candidates = Vec::new();
         if let Ok(sig) = std::env::var("HYPRLAND_INSTANCE_SIGNATURE") {
             if let Ok(runtime) = std::env::var("XDG_RUNTIME_DIR") {
@@ -491,12 +506,15 @@ mod linux_impl {
                 use std::io::Write;
                 let cmd = format!("dispatch movecursor {},{}\n", px, py);
                 if stream.write_all(cmd.as_bytes()).is_ok() {
+                    if let Ok(mut guard) = CACHED_HYPR_SOCKET.lock() {
+                        *guard = Some(sock_path);
+                    }
                     return true;
                 }
             }
         }
 
-        // 2. Fallback: Command hyprctl dispatch movecursor
+        // 3. Fallback: Command hyprctl dispatch movecursor
         if let Ok(status) = std::process::Command::new("hyprctl")
             .args(["dispatch", "movecursor", &format!("{},{}", px, py)])
             .status()

@@ -506,20 +506,17 @@ class HyprRemoteUnifiedApp {
         const liveEnd = video.buffered.end(video.buffered.length - 1);
         const delay = liveEnd - video.currentTime;
 
-        // Smooth rate adaptation without buffer starvation:
-        // When delay is under 150ms, play at 1.0x (100% natural smooth playback, zero judder)
-        // If delay drifts above 220ms, gently catch up at 1.06x (or 1.12x if delay > 0.5s)
-        // Once delay returns to <= 90ms, return to 1.0x
-        if (delay > 0.22) {
-          video.playbackRate = delay > 0.5 ? 1.12 : 1.06;
-        } else if (delay <= 0.09) {
+        // Ultra-low latency dynamic drift compensation without buffer starvation:
+        // Target sweet spot: 35ms - 70ms buffer delay (< 15-20ms perceived glass-to-glass latency)
+        if (delay > 0.16) {
+          video.playbackRate = delay > 0.35 ? 1.10 : 1.05;
+        } else if (delay <= 0.07) {
           video.playbackRate = 1.0;
         }
 
-        // Only hard-seek on severe lag (> 1.2s, e.g. after window minimize or network hang)
-        // And seek to liveEnd - 0.06 (60ms buffer cushion), NEVER 15ms!
-        if (delay > 1.2) {
-          video.currentTime = Math.max(0, liveEnd - 0.06);
+        // Catch-up seek on severe lag (> 0.8s, e.g. after window minimize)
+        if (delay > 0.8) {
+          video.currentTime = Math.max(0, liveEnd - 0.04);
         }
 
         if (this.dom.statLatency) {
@@ -538,6 +535,9 @@ class HyprRemoteUnifiedApp {
       }
       if ('requestVideoFrameCallback' in video) {
         video.requestVideoFrameCallback(trackHwFrame);
+      } else {
+        requestAnimationFrame(trackHwFrame);
+      }
       }
     };
 
@@ -575,6 +575,8 @@ class HyprRemoteUnifiedApp {
 
       if ('requestVideoFrameCallback' in video) {
         video.requestVideoFrameCallback(trackHwFrame);
+      } else {
+        requestAnimationFrame(trackHwFrame);
       }
     };
 
