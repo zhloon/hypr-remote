@@ -37,6 +37,7 @@ class HyprRemoteUnifiedApp {
       sessionTitle: document.getElementById('session-target-title'),
       statFps: document.getElementById('stat-fps'),
       statLatency: document.getElementById('stat-latency'),
+      btnToggleQuality: document.getElementById('btn-toggle-quality'),
       btnToggleScale: document.getElementById('btn-toggle-scale'),
       btnToggleFs: document.getElementById('btn-toggle-fs'),
       btnToggleLock: document.getElementById('btn-toggle-lock'),
@@ -119,6 +120,10 @@ class HyprRemoteUnifiedApp {
     this.dom.btnDisconnect.addEventListener('click', () => this.disconnect());
     this.dom.btnToggleFs.addEventListener('click', () => this.toggleFullscreen());
     this.dom.btnToggleLock.addEventListener('click', () => this.togglePointerLock());
+
+    if (this.dom.btnToggleQuality) {
+      this.dom.btnToggleQuality.addEventListener('click', () => this.toggleQualityMode());
+    }
 
     if (this.dom.btnToggleScale) {
       this.dom.btnToggleScale.addEventListener('click', () => this.toggleScaleMode());
@@ -371,6 +376,22 @@ class HyprRemoteUnifiedApp {
       this.dom.btnToggleScale.classList.toggle('active', this.isStretched);
     }
     this._updateCanvasLayout();
+  }
+
+  toggleQualityMode() {
+    const modes = [
+      { id: 'balanced', label: '⚡ 平衡模式' },
+      { id: 'crystal', label: '💎 超清画质' },
+      { id: 'performance', label: '🚀 极速高帧' },
+    ];
+    this.currentQualityIdx = ((this.currentQualityIdx || 0) + 1) % modes.length;
+    const mode = modes[this.currentQualityIdx];
+    if (this.dom.btnToggleQuality) {
+      this.dom.btnToggleQuality.textContent = mode.label;
+    }
+    if (this.activeSession) {
+      fetch(`http://${this.activeSession.ip}:${this.activeSession.port}/quality?mode=${mode.id}`).catch(() => {});
+    }
   }
 
   togglePointerLock() {

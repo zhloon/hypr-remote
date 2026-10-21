@@ -31,17 +31,27 @@ impl EmbeddedHostServer {
     }
 
     pub fn start_background(self: Arc<Self>) {
-        // Task 1: Dedicated High-FPS Frame Capture Engine (decoupled from network)
+        // Task 1: Dedicated High-FPS Frame Capture Engine (decoupled from network & Tokio executor)
         let tx = self.frame_tx.clone();
-        tauri::async_runtime::spawn(async move {
-            loop {
-                let (frame_bytes, _) = capture_desktop_frame();
-                if !frame_bytes.is_empty() {
-                    let _ = tx.send(frame_bytes);
+        std::thread::Builder::new()
+            .name("capture-engine".into())
+            .spawn(move || {
+                let target_interval = Duration::from_millis(16); // Target ~60 FPS
+                loop {
+                    let start = std::time::Instant::now();
+                    let (frame_bytes, _) = capture_desktop_frame();
+                    if !frame_bytes.is_empty() {
+                        let _ = tx.send(frame_bytes);
+                    }
+                    let elapsed = start.elapsed();
+                    if elapsed < target_interval {
+                        std::thread::sleep(target_interval - elapsed);
+                    } else {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
                 }
-                tokio::time::sleep(Duration::from_millis(15)).await;
-            }
-        });
+            })
+            .expect("failed to spawn capture engine thread");
 
         // Task 2: High-Performance TCP Streaming Server with Port Fallback
         let this = self.clone();
@@ -223,7 +233,24 @@ impl EmbeddedHostServer {
                 {\"status\":\"ok\"}";
             let _ = stream.write_all(response.as_bytes()).await;
         }
-        // 3. Ping / Info: GET /info
+        // 5. Dynamic Quality / FPS Adjustment: GET or POST /quality?mode=crystal|performance|balanced
+        else if (method == "GET" || method == "POST") && path.starts_with("/quality") {
+            let mode = if path.contains("mode=crystal") {
+                "crystal"
+            } else if path.contains("mode=performance") {
+                "performance"
+            } else {
+                "balanced"
+            };
+            crate::capture::set_quality_mode(mode);
+            let response = "HTTP/1.1 200 OK\r\n\
+                Content-Type: application/json\r\n\
+                Access-Control-Allow-Origin: *\r\n\
+                Content-Length: 15\r\n\r\n\
+                {\"status\":\"ok\"}";
+            let _ = stream.write_all(response.as_bytes()).await;
+        }
+        // 6. Ping / Info: GET /info
         else if method == "GET" && path.starts_with("/info") {
             let mut info = self.my_info.clone();
             info.local_ip = crate::discovery::get_local_ip();

@@ -2,6 +2,31 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 pub static CURRENT_SCREEN_WIDTH: AtomicU32 = AtomicU32::new(1920);
 pub static CURRENT_SCREEN_HEIGHT: AtomicU32 = AtomicU32::new(1080);
+pub static CAPTURE_QUALITY: AtomicU32 = AtomicU32::new(75);
+pub static CAPTURE_SCALE: AtomicU32 = AtomicU32::new(100);
+
+pub fn set_quality_mode(mode: &str) {
+    match mode {
+        "crystal" => {
+            // Ultra-clarity: 100% resolution, Quality 88 (crystal text, ideal for coding/reading)
+            CAPTURE_QUALITY.store(88, Ordering::Relaxed);
+            CAPTURE_SCALE.store(100, Ordering::Relaxed);
+            println!("[Capture] Switched to Ultra Clarity mode (Q=88, scale=1.0)");
+        }
+        "performance" => {
+            // High-framerate: 80% resolution, Quality 65 (fastest encoding, 50-60 FPS)
+            CAPTURE_QUALITY.store(65, Ordering::Relaxed);
+            CAPTURE_SCALE.store(80, Ordering::Relaxed);
+            println!("[Capture] Switched to High Framerate mode (Q=65, scale=0.8)");
+        }
+        _ => {
+            // Balanced (default): 100% resolution, Quality 75
+            CAPTURE_QUALITY.store(75, Ordering::Relaxed);
+            CAPTURE_SCALE.store(100, Ordering::Relaxed);
+            println!("[Capture] Switched to Balanced mode (Q=75, scale=1.0)");
+        }
+    }
+}
 
 static FALLBACK_JPEG: &[u8] = include_bytes!("../icons/fallback.jpg");
 
@@ -25,11 +50,20 @@ fn update_jpeg_dimensions(data: &[u8]) {
 
 #[cfg(target_os = "linux")]
 fn capture_os() -> Option<Vec<u8>> {
-    // High-performance Wayland capture via grim (Quality 75: optimal balance of crystal text and high FPS)
-    if let Ok(output) = std::process::Command::new("grim")
-        .args(["-t", "jpeg", "-q", "75", "-"])
-        .output()
-    {
+    let q = CAPTURE_QUALITY.load(Ordering::Relaxed).to_string();
+    let s = CAPTURE_SCALE.load(Ordering::Relaxed);
+
+    let mut cmd = std::process::Command::new("grim");
+    cmd.args(["-t", "jpeg", "-q", &q]);
+
+    let scale_arg;
+    if s > 0 && s < 100 {
+        scale_arg = format!("{:.2}", s as f32 / 100.0);
+        cmd.args(["-s", &scale_arg]);
+    }
+    cmd.arg("-");
+
+    if let Ok(output) = cmd.output() {
         if output.status.success() && !output.stdout.is_empty() {
             update_jpeg_dimensions(&output.stdout);
             return Some(output.stdout);
@@ -38,7 +72,7 @@ fn capture_os() -> Option<Vec<u8>> {
 
     // Fallback scaled capture if hardware requires lower resolution
     if let Ok(output) = std::process::Command::new("grim")
-        .args(["-s", "0.85", "-t", "jpeg", "-q", "75", "-"])
+        .args(["-s", "0.80", "-t", "jpeg", "-q", "65", "-"])
         .output()
     {
         if output.status.success() && !output.stdout.is_empty() {
