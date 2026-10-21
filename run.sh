@@ -74,6 +74,11 @@ pkill -f hypr-remote-client 2>/dev/null || true
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR/client/src-tauri"
 
+export WEBKIT_DISABLE_COMPOSITING_MODE=1
+export WEBKIT_DISABLE_DMABUF_RENDERER=1
+export GDK_BACKEND="wayland,x11"
+export RUST_BACKTRACE=1
+
 if ! cargo run; then
     echo ""
     echo "============================================="
