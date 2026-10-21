@@ -285,9 +285,10 @@ class HyprRemoteUnifiedApp {
     const img = this.dom.remoteImg;
 
     const mimeTypes = [
-      'video/mp4; codecs="avc1.42E01E"',
+      'video/mp4; codecs="avc1.64002A"',
       'video/mp4; codecs="avc1.640028"',
       'video/mp4; codecs="avc1.4D401F"',
+      'video/mp4; codecs="avc1.42E01E"',
       'video/mp4',
     ];
     let selectedMime = mimeTypes.find((m) => MediaSource.isTypeSupported(m));
@@ -297,6 +298,10 @@ class HyprRemoteUnifiedApp {
 
     this.h264AbortController = new AbortController();
     const streamUrl = `http://${this.activeSession.ip}:${this.activeSession.port}/h264_stream`;
+
+    video.muted = true;
+    video.autoplay = true;
+    video.playsInline = true;
 
     const mediaSource = new MediaSource();
     video.src = URL.createObjectURL(mediaSource);
@@ -332,17 +337,16 @@ class HyprRemoteUnifiedApp {
     };
 
     sourceBuffer.addEventListener('updateend', () => {
-      // Auto-chase live edge with adaptive playbackRate to eliminate decoder stutter & lag
+      // Auto-chase live edge with zero-lag threshold for instant 60fps rendering
       if (video.buffered.length > 0) {
         const end = video.buffered.end(video.buffered.length - 1);
         const delay = end - video.currentTime;
-        if (delay > 0.35) {
-          // Major lag (e.g. initial connection, window switch, or network hiccup)
-          video.currentTime = Math.max(0, end - 0.03);
-        } else if (delay > 0.08) {
-          // Smoothly catch up without micro-freezing or dropping frames
-          video.playbackRate = 1.06;
-        } else if (delay < 0.03) {
+        if (delay > 0.08) {
+          // Immediately chase live edge without micro-stutter
+          video.currentTime = Math.max(0, end - 0.015);
+        } else if (delay > 0.04) {
+          video.playbackRate = 1.05;
+        } else {
           video.playbackRate = 1.0;
         }
       }
@@ -681,11 +685,6 @@ class HyprRemoteUnifiedApp {
   }
 
   onMouseMove(e) {
-    const now = performance.now();
-    // Cap mouse movement rate to ~100 FPS (10ms) for butter-smooth tracking without lag
-    if (now - this.lastInputTime < 10) return;
-    this.lastInputTime = now;
-
     if (this.isPointerLocked) {
       this._sendInput({
         type: 'MouseMove',
@@ -695,22 +694,36 @@ class HyprRemoteUnifiedApp {
         dy: e.movementY,
         is_rel: true,
       });
-    } else {
-      const coords = this._getNormalizedCoords(e);
-      if (coords) {
-        this._sendInput({
-          type: 'MouseMove',
-          x: coords.x,
-          y: coords.y,
-          dx: 0,
-          dy: 0,
-          is_rel: false,
-        });
-      }
+      return;
+    }
+
+    const coords = this._getNormalizedCoords(e);
+    if (!coords) return;
+
+    this._pendingCoords = coords;
+    if (!this._moveRaf) {
+      this._moveRaf = requestAnimationFrame(() => {
+        this._moveRaf = null;
+        if (this._pendingCoords) {
+          this._sendInput({
+            type: 'MouseMove',
+            x: this._pendingCoords.x,
+            y: this._pendingCoords.y,
+            dx: 0,
+            dy: 0,
+            is_rel: false,
+          });
+          this._pendingCoords = null;
+        }
+      });
     }
   }
 
   onMouseDown(e) {
+    if (this._moveRaf) {
+      cancelAnimationFrame(this._moveRaf);
+      this._moveRaf = null;
+    }
     if (!this.isPointerLocked) {
       const coords = this._getNormalizedCoords(e);
       if (coords) {
@@ -732,6 +745,10 @@ class HyprRemoteUnifiedApp {
   }
 
   onMouseUp(e) {
+    if (this._moveRaf) {
+      cancelAnimationFrame(this._moveRaf);
+      this._moveRaf = null;
+    }
     if (!this.isPointerLocked) {
       const coords = this._getNormalizedCoords(e);
       if (coords) {

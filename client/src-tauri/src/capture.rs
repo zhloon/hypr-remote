@@ -104,47 +104,33 @@ pub fn capture_desktop_frame() -> (Vec<u8>, &'static str) {
 
 #[cfg(target_os = "linux")]
 pub fn spawn_h264_recorder_process() -> Result<tokio::process::Child, std::io::Error> {
-    let mut cmd = tokio::process::Command::new("wf-recorder");
-    cmd.arg("-m").arg("mp4");
-    cmd.arg("--muxer-param=movflags=frag_keyframe+empty_moov+default_base_moof");
-    cmd.arg("-x").arg("yuv420p");
-    cmd.arg("-r").arg("60");       // Strict 60 FPS capture rate
+    // Kill any lingering recorder instance to ensure clean port/device access
+    let _ = std::process::Command::new("pkill").arg("-x").arg("wf-recorder").status();
 
-    // Detect hardware acceleration device
-    if std::path::Path::new("/proc/driver/nvidia/version").exists() {
-        println!("[H264/GPU] Detected NVIDIA GPU -> Using h264_nvenc (Hardware Acceleration, 60fps, 24M)");
-        cmd.arg("-c").arg("h264_nvenc");
-        cmd.arg("-p").arg("preset=p1");
-        cmd.arg("-p").arg("tune=ull");
-        cmd.arg("-p").arg("b=24M");
-        cmd.arg("-p").arg("g=30");    // 0.5s GOP keyframe interval
-        cmd.arg("-p").arg("bf=0");   // 0 B-frames to eliminate reordering latency
+    let encoder_args = if std::path::Path::new("/proc/driver/nvidia/version").exists() {
+        println!("[H264/GPU] Detected NVIDIA GPU -> Using h264_nvenc (Hardware Acceleration, 60fps, 30M, Ultra-Clarity)");
+        "-c h264_nvenc -p preset=p1 -p tune=ull -p b=30M -p g=30 -p bf=0"
     } else if std::path::Path::new("/dev/dri/renderD128").exists() {
-        println!("[H264/GPU] Detected VA-API GPU (/dev/dri/renderD128) -> Using h264_vaapi (Hardware Acceleration, 60fps, 24M)");
-        cmd.arg("-c").arg("h264_vaapi");
-        cmd.arg("-d").arg("/dev/dri/renderD128");
-        cmd.arg("-p").arg("b=24M");
-        cmd.arg("-p").arg("g=30");
-        cmd.arg("-p").arg("bf=0");
+        println!("[H264/GPU] Detected VA-API GPU (/dev/dri/renderD128) -> Using h264_vaapi (Hardware Acceleration, 60fps, 30M, Ultra-Clarity)");
+        "-c h264_vaapi -d /dev/dri/renderD128 -p b=30M -p g=30 -p bf=0"
     } else if std::path::Path::new("/dev/dri/renderD129").exists() {
-        println!("[H264/GPU] Detected VA-API GPU (/dev/dri/renderD129) -> Using h264_vaapi (Hardware Acceleration, 60fps, 24M)");
-        cmd.arg("-c").arg("h264_vaapi");
-        cmd.arg("-d").arg("/dev/dri/renderD129");
-        cmd.arg("-p").arg("b=24M");
-        cmd.arg("-p").arg("g=30");
-        cmd.arg("-p").arg("bf=0");
+        println!("[H264/GPU] Detected VA-API GPU (/dev/dri/renderD129) -> Using h264_vaapi (Hardware Acceleration, 60fps, 30M, Ultra-Clarity)");
+        "-c h264_vaapi -d /dev/dri/renderD129 -p b=30M -p g=30 -p bf=0"
     } else {
-        println!("[H264/CPU] No dedicated hardware encoder node -> Using libx264 ultrafast (CRF 19, 60fps, 24M)");
-        cmd.arg("-c").arg("libx264");
-        cmd.arg("-p").arg("preset=ultrafast");
-        cmd.arg("-p").arg("tune=zerolatency");
-        cmd.arg("-p").arg("crf=19");
-        cmd.arg("-p").arg("b=24M");
-        cmd.arg("-p").arg("g=30");
-        cmd.arg("-p").arg("bf=0");
-    }
+        println!("[H264/CPU] No dedicated hardware encoder node -> Using libx264 ultrafast (CRF 16, 60fps, 30M)");
+        "-c libx264 -p preset=ultrafast -p tune=zerolatency -p crf=16 -p b=30M -p g=30 -p bf=0"
+    };
 
-    cmd.arg("-f").arg("-");
+    // Matroska container streams cleanly to stdout without seeking; ffmpeg remuxes it to Fragmented MP4 with 0% CPU
+    let pipeline = format!(
+        "wf-recorder -m matroska -x yuv420p -r 60 {} -f - | ffmpeg -hide_banner -loglevel error -f matroska -i - -c:v copy -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof -",
+        encoder_args
+    );
+
+    println!("[H264] Spawning hardware streaming pipeline: {}", pipeline);
+
+    let mut cmd = tokio::process::Command::new("sh");
+    cmd.arg("-c").arg(pipeline);
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::inherit());
 

@@ -41,16 +41,21 @@ impl EmbeddedHostServer {
                 .spawn(move || {
                     let target_interval = Duration::from_millis(16); // Target ~60 FPS
                     loop {
-                        let start = std::time::Instant::now();
-                        let (frame_bytes, _) = capture_desktop_frame();
-                        if !frame_bytes.is_empty() {
-                            let _ = tx.send(frame_bytes);
-                        }
-                        let elapsed = start.elapsed();
-                        if elapsed < target_interval {
-                            std::thread::sleep(target_interval - elapsed);
+                        if tx.receiver_count() > 1 {
+                            let start = std::time::Instant::now();
+                            let (frame_bytes, _) = capture_desktop_frame();
+                            if !frame_bytes.is_empty() {
+                                let _ = tx.send(frame_bytes);
+                            }
+                            let elapsed = start.elapsed();
+                            if elapsed < target_interval {
+                                std::thread::sleep(target_interval - elapsed);
+                            } else {
+                                std::thread::sleep(Duration::from_millis(1));
+                            }
                         } else {
-                            std::thread::sleep(Duration::from_millis(1));
+                            // No client active on MJPEG/JPEG stream: idle at low frequency
+                            std::thread::sleep(Duration::from_millis(250));
                         }
                     }
                 })
