@@ -47,6 +47,7 @@ class HyprRemoteUnifiedApp {
 
     this.isH264Active = false;
     this.h264AbortController = null;
+    this.currentQualityIdx = 0;
 
     this.ctx = this.dom.remoteCanvas ? this.dom.remoteCanvas.getContext('2d', { alpha: false }) : null;
 
