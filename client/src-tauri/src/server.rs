@@ -17,13 +17,13 @@ pub struct EmbeddedHostServer {
     pub port: u16,
     pub pin: String,
     pub my_info: MyDeviceInfo,
-    frame_tx: watch::Sender<Vec<u8>>,
-    frame_rx: watch::Receiver<Vec<u8>>,
+    frame_tx: watch::Sender<Arc<Vec<u8>>>,
+    frame_rx: watch::Receiver<Arc<Vec<u8>>>,
 }
 
 impl EmbeddedHostServer {
     pub fn new(port: u16, my_info: MyDeviceInfo) -> Self {
-        let (frame_tx, frame_rx) = watch::channel(Vec::new());
+        let (frame_tx, frame_rx) = watch::channel(Arc::new(Vec::new()));
         let pin = my_info.pin.clone();
         Self {
             port,
@@ -59,7 +59,7 @@ impl EmbeddedHostServer {
                             let start = std::time::Instant::now();
                             let (frame_bytes, _) = capture_desktop_frame();
                             if !frame_bytes.is_empty() {
-                                let _ = tx.send(frame_bytes);
+                                let _ = tx.send(Arc::new(frame_bytes));
                             }
                             let elapsed = start.elapsed();
                             if elapsed < target_interval {
@@ -148,11 +148,13 @@ impl EmbeddedHostServer {
                 .as_secs();
             LAST_CLIENT_FRAME_TIME.store(now, std::sync::atomic::Ordering::Relaxed);
 
-            let mut frame_bytes = self.frame_rx.borrow().clone();
-            if frame_bytes.is_empty() {
+            let frame_bytes = self.frame_rx.borrow().clone();
+            let data = if frame_bytes.is_empty() {
                 let (bytes, _) = capture_desktop_frame();
-                frame_bytes = bytes;
-            }
+                Arc::new(bytes)
+            } else {
+                frame_bytes
+            };
             let header = format!(
                 "HTTP/1.1 200 OK\r\n\
                 Content-Type: image/jpeg\r\n\
@@ -162,10 +164,10 @@ impl EmbeddedHostServer {
                 Expires: 0\r\n\
                 Access-Control-Allow-Origin: *\r\n\
                 Connection: close\r\n\r\n",
-                frame_bytes.len()
+                data.len()
             );
             let _ = stream.write_all(header.as_bytes()).await;
-            let _ = stream.write_all(&frame_bytes).await;
+            let _ = stream.write_all(&data).await;
         }
         // 2. High-FPS MJPEG Screen Stream: GET /stream
         else if method == "GET" && path.starts_with("/stream") {

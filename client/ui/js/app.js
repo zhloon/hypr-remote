@@ -45,8 +45,10 @@ class HyprRemoteUnifiedApp {
       btnDisconnect: document.getElementById('btn-disconnect'),
       btnCollapseNav: document.getElementById('btn-collapse-nav'),
       navTriggerHandle: document.getElementById('nav-trigger-handle'),
+      viewport: document.querySelector('.screen-viewport'),
     };
 
+    this._cachedRect = null;
     this.scaleMode = 'fit'; // Default standard aspect-ratio fit
     this.isH264Active = false;
     this.h264AbortController = null;
@@ -159,7 +161,7 @@ class HyprRemoteUnifiedApp {
 
     // Auto-hiding session nav bar controls
     let isMouseInsideNav = false;
-    this._showNav = (autoHideDelay = 0) => {
+    this._showNav = (autoHideDelay = 2500) => {
       if (!this.dom.sessionNav) return;
       if (this.navHideTimer) {
         clearTimeout(this.navHideTimer);
@@ -167,10 +169,9 @@ class HyprRemoteUnifiedApp {
       }
       this.dom.sessionNav.classList.add('visible');
       if (this.dom.navTriggerHandle) {
-        this.dom.navTriggerHandle.style.opacity = '0';
-        this.dom.navTriggerHandle.style.pointerEvents = 'none';
+        this.dom.navTriggerHandle.classList.add('hidden');
       }
-      if (autoHideDelay > 0) {
+      if (autoHideDelay > 0 && !isMouseInsideNav) {
         this.navHideTimer = setTimeout(() => {
           if (!isMouseInsideNav) {
             this._hideNav();
@@ -187,27 +188,29 @@ class HyprRemoteUnifiedApp {
       }
       this.dom.sessionNav.classList.remove('visible');
       if (this.dom.navTriggerHandle) {
-        this.dom.navTriggerHandle.style.opacity = '1';
-        this.dom.navTriggerHandle.style.pointerEvents = 'auto';
+        this.dom.navTriggerHandle.classList.remove('hidden');
       }
     };
 
     if (this.dom.sessionNav) {
       this.dom.sessionNav.addEventListener('mouseenter', () => {
         isMouseInsideNav = true;
-        this._showNav(0);
+        if (this.navHideTimer) {
+          clearTimeout(this.navHideTimer);
+          this.navHideTimer = null;
+        }
       });
       this.dom.sessionNav.addEventListener('mouseleave', () => {
         isMouseInsideNav = false;
-        this._showNav(1800);
+        this._showNav(1500);
       });
     }
     if (this.dom.navTriggerHandle) {
       this.dom.navTriggerHandle.addEventListener('mouseenter', () => {
-        this._showNav(0);
+        this._showNav(2500);
       });
       this.dom.navTriggerHandle.addEventListener('click', () => {
-        this._showNav(0);
+        this._showNav(3000);
       });
     }
     if (this.dom.btnCollapseNav) {
@@ -218,12 +221,14 @@ class HyprRemoteUnifiedApp {
       });
     }
 
-    // Top-center trigger area (only within central handle area, never full screen width)
+    // Top-center trigger area (only within extreme top edge, avoiding normal window clicks)
     window.addEventListener('mousemove', (e) => {
       if (!this.activeSession) return;
-      const inCenter = Math.abs(e.clientX - window.innerWidth / 2) < 90;
-      if (e.clientY <= 14 && inCenter) {
-        this._showNav(0);
+      const inCenter = Math.abs(e.clientX - window.innerWidth / 2) < 75;
+      if (e.clientY <= 3 && inCenter) {
+        if (!this.dom.sessionNav.classList.contains('visible')) {
+          this._showNav(2500);
+        }
       }
     });
 
@@ -500,6 +505,7 @@ class HyprRemoteUnifiedApp {
     let hasPlayed = false;
     let hwFrameCount = 0;
     let hwLastFpsTime = performance.now();
+    let hwLastLatencyTime = performance.now();
     const trackHwFrame = () => {
       if (!this.sessionRunning || !this.isH264Active) return;
 
@@ -508,21 +514,27 @@ class HyprRemoteUnifiedApp {
         const delay = liveEnd - video.currentTime;
 
         // Ultra-low latency dynamic drift compensation without buffer starvation:
-        // Target sweet spot: 30ms - 60ms buffer delay (< 15ms perceived glass-to-glass latency)
-        if (delay > 0.14) {
-          video.playbackRate = delay > 0.30 ? 1.10 : 1.05;
-        } else if (delay <= 0.06) {
+        // Continuous smooth playbackRate adjustment ensures zero stalls and zero seeks
+        if (delay > 0.40) {
+          video.playbackRate = 1.12;
+        } else if (delay > 0.15) {
+          video.playbackRate = 1.06;
+        } else if (delay > 0.08) {
+          video.playbackRate = 1.03;
+        } else if (delay <= 0.04) {
           video.playbackRate = 1.0;
         }
 
-        // Catch-up seek on severe lag (> 0.6s, e.g. after window minimize)
-        if (delay > 0.6) {
-          video.currentTime = Math.max(0, liveEnd - 0.03);
+        // Hard catch-up seek only on extreme lag (> 1.5s, e.g. after window minimize)
+        if (delay > 1.5) {
+          video.currentTime = Math.max(0, liveEnd - 0.08);
         }
 
-        if (this.dom.statLatency) {
+        const now = performance.now();
+        if (this.dom.statLatency && now - hwLastLatencyTime >= 250) {
           const latMs = Math.round(delay * 1000);
           this.dom.statLatency.textContent = `${Math.max(5, latMs)}ms`;
+          hwLastLatencyTime = now;
         }
       }
 
@@ -539,6 +551,10 @@ class HyprRemoteUnifiedApp {
       } else {
         requestAnimationFrame(trackHwFrame);
       }
+    };
+
+    video.onwaiting = () => {
+      video.playbackRate = 1.0;
     };
 
     const h264Watchdog = setTimeout(() => {
@@ -559,10 +575,6 @@ class HyprRemoteUnifiedApp {
     video.onplaying = () => {
       hasPlayed = true;
       clearTimeout(h264Watchdog);
-      if (video.buffered.length > 0) {
-        const liveEnd = video.buffered.end(video.buffered.length - 1);
-        video.currentTime = Math.max(0, liveEnd - 0.03);
-      }
       video.style.display = 'block';
       if (canvas) canvas.style.display = 'none';
       if (img) img.style.display = 'none';
@@ -685,8 +697,11 @@ class HyprRemoteUnifiedApp {
               this.lastFpsTime = now;
             }
 
-            if (this.dom.statLatency) {
-              this.dom.statLatency.textContent = `${Math.min(latency, 25)}ms`;
+            if (!this.lastCanvasLatencyTime || now - this.lastCanvasLatencyTime >= 250) {
+              if (this.dom.statLatency) {
+                this.dom.statLatency.textContent = `${Math.min(latency, 25)}ms`;
+              }
+              this.lastCanvasLatencyTime = now;
             }
 
             // Yield to browser vsync to maintain high framerate without UI blocking
@@ -903,6 +918,7 @@ class HyprRemoteUnifiedApp {
   }
 
   _updateCanvasLayout() {
+    this._cachedRect = null;
     const el = this._getActiveElement();
     if (!el) return;
 
@@ -910,7 +926,7 @@ class HyprRemoteUnifiedApp {
     const nh = this.remoteHeight || el.videoHeight || el.naturalHeight || el.height || 1080;
 
     // Standard aspect-ratio fit
-    const viewport = document.querySelector('.screen-viewport');
+    const viewport = this.dom.viewport || document.querySelector('.screen-viewport');
     const vw = viewport ? viewport.clientWidth : window.innerWidth;
     const vh = viewport ? viewport.clientHeight : window.innerHeight;
 
@@ -996,7 +1012,7 @@ class HyprRemoteUnifiedApp {
   _getNormalizedCoords(e) {
     const el = this._getActiveElement();
     if (!el) return null;
-    const rect = el.getBoundingClientRect();
+    const rect = this._cachedRect || (this._cachedRect = el.getBoundingClientRect());
     if (rect.width <= 0 || rect.height <= 0) return null;
 
     const nw = el.videoWidth || this.remoteWidth || el.naturalWidth || el.width || 1920;
