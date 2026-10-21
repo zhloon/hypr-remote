@@ -1,7 +1,6 @@
-#[allow(unused_imports)]
+#![allow(dead_code, unused_imports, unused_variables)]
 use crate::capture::{CURRENT_SCREEN_HEIGHT, CURRENT_SCREEN_WIDTH};
 use crate::types::ControlMessage;
-#[allow(unused_imports)]
 use std::sync::atomic::Ordering;
 
 pub fn handle_control_message(msg: ControlMessage) {
@@ -208,7 +207,6 @@ mod linux_impl {
     const BTN_MIDDLE: u16 = 274;
     const BTN_SIDE: u16 = 275;
     const BTN_EXTRA: u16 = 276;
-    const BTN_TOUCH: u16 = 330;
 
     const BUS_USB: u16 = 0x03;
 
@@ -359,7 +357,6 @@ mod linux_impl {
 
     static UINPUT: Mutex<Option<UinputDevice>> = Mutex::new(None);
     static UINPUT_INITIALIZED: AtomicBool = AtomicBool::new(false);
-    static MOVE_LOG_COUNTER: AtomicU32 = AtomicU32::new(0);
 
     fn get_uinput() -> std::sync::MutexGuard<'static, Option<UinputDevice>> {
         let mut guard = match UINPUT.lock() {
@@ -543,59 +540,6 @@ mod linux_impl {
                 dev.write_event(EV_ABS, ABS_Y, abs_y);
                 dev.syn();
             }
-        }
-    }
-
-    static PENDING_MOVE: Mutex<Option<(f32, f32, i32, i32, bool)>> = Mutex::new(None);
-    static WORKER_RUNNING: AtomicBool = AtomicBool::new(false);
-
-    fn submit_coalesced_mouse_move(x: f32, y: f32, dx: i32, dy: i32, is_rel: bool) {
-        {
-            let mut lock = match PENDING_MOVE.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            *lock = Some((x, y, dx, dy, is_rel));
-        }
-
-        if !WORKER_RUNNING.swap(true, Ordering::SeqCst) {
-            std::thread::Builder::new()
-                .name("ydotool-coalescer".into())
-                .spawn(move || {
-                    loop {
-                        let target = {
-                            let mut lock = match PENDING_MOVE.lock() {
-                                Ok(g) => g,
-                                Err(p) => p.into_inner(),
-                            };
-                            lock.take()
-                        };
-
-                        if let Some((x, y, dx, dy, is_rel)) = target {
-                            if is_rel {
-                                let _ = prepare_ydotool_cmd("mousemove")
-                                    .args(["--", &dx.to_string(), &dy.to_string()])
-                                    .status();
-                            } else {
-                                let (screen_w, screen_h, ox, oy) = get_active_monitor_bounds();
-                                let px = ox + (x * screen_w).round() as i32;
-                                let py = oy + (y * screen_h).round() as i32;
-                                let ydo_res = prepare_ydotool_cmd("mousemove")
-                                    .args(["-a", &px.to_string(), &py.to_string()])
-                                    .status();
-                                if ydo_res.is_err() || !ydo_res.unwrap().success() {
-                                    let _ = std::process::Command::new("hyprctl")
-                                        .args(["dispatch", "movecursor", &format!("{},{}", px, py)])
-                                        .status();
-                                }
-                            }
-                        } else {
-                            WORKER_RUNNING.store(false, Ordering::SeqCst);
-                            break;
-                        }
-                    }
-                })
-                .expect("failed to spawn ydotool coalescer");
         }
     }
 

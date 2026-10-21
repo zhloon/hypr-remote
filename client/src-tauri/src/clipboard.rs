@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_imports, unused_variables)]
 use std::io::Write;
 use std::process::{Command, Stdio};
 
