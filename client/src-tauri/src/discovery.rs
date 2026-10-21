@@ -76,7 +76,27 @@ pub fn get_active_interfaces() -> Vec<NetInterface> {
     Vec::new()
 }
 
+static LOCAL_IP_CACHE: Mutex<Option<(std::time::Instant, String)>> = Mutex::new(None);
+
 pub fn get_local_ip() -> String {
+    if let Ok(guard) = LOCAL_IP_CACHE.lock() {
+        if let Some((ts, ref ip)) = *guard {
+            if ts.elapsed() < Duration::from_secs(5) {
+                return ip.clone();
+            }
+        }
+    }
+
+    let ip = get_local_ip_uncached();
+
+    if let Ok(mut guard) = LOCAL_IP_CACHE.lock() {
+        *guard = Some((std::time::Instant::now(), ip.clone()));
+    }
+
+    ip
+}
+
+fn get_local_ip_uncached() -> String {
     let ifaces = get_active_interfaces();
     // 1. Prefer 192.168.x.x
     for iface in &ifaces {
@@ -277,7 +297,9 @@ impl DiscoveryManager {
                     for target in &targets {
                         let _ = s_send.send_to(beacon_msg.as_bytes(), target).await;
                     }
-                    tokio::time::sleep(Duration::from_millis(1500)).await;
+                    let is_streaming = crate::server::H264_STREAM_ACTIVE.load(std::sync::atomic::Ordering::Relaxed);
+                    let sleep_ms = if is_streaming { 5000 } else { 1500 };
+                    tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
                 }
             });
 
@@ -287,6 +309,12 @@ impl DiscoveryManager {
             tauri::async_runtime::spawn(async move {
                 let clean_code = my_info_sweep.code.replace(" ", "");
                 loop {
+                    let is_streaming = crate::server::H264_STREAM_ACTIVE.load(std::sync::atomic::Ordering::Relaxed);
+                    if is_streaming {
+                        tokio::time::sleep(Duration::from_millis(25000)).await;
+                        continue;
+                    }
+
                     let cur_ip = get_local_ip();
                     if let Some(idx) = cur_ip.rfind('.') {
                         let prefix = &cur_ip[..=idx]; // e.g. "192.168.5."
@@ -306,7 +334,7 @@ impl DiscoveryManager {
                             }
                         }
                     }
-                    tokio::time::sleep(Duration::from_millis(3500)).await;
+                    tokio::time::sleep(Duration::from_millis(8000)).await;
                 }
             });
 
@@ -388,6 +416,12 @@ impl DiscoveryManager {
             tauri::async_runtime::spawn(async move {
                 let clean_code = my_info_http.code.replace(" ", "");
                 loop {
+                    let is_streaming = crate::server::H264_STREAM_ACTIVE.load(std::sync::atomic::Ordering::Relaxed);
+                    if is_streaming {
+                        tokio::time::sleep(Duration::from_millis(30000)).await;
+                        continue;
+                    }
+
                     let cur_ip = get_local_ip();
                     if let Some(idx) = cur_ip.rfind('.') {
                         let prefix = cur_ip[..=idx].to_string(); // e.g. "192.168.5."
@@ -465,7 +499,7 @@ impl DiscoveryManager {
                             });
                         }
                     }
-                    tokio::time::sleep(Duration::from_millis(3500)).await;
+                    tokio::time::sleep(Duration::from_millis(12000)).await;
                 }
             });
         });

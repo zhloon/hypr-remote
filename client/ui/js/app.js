@@ -507,16 +507,16 @@ class HyprRemoteUnifiedApp {
         const delay = liveEnd - video.currentTime;
 
         // Ultra-low latency dynamic drift compensation without buffer starvation:
-        // Target sweet spot: 35ms - 70ms buffer delay (< 15-20ms perceived glass-to-glass latency)
-        if (delay > 0.16) {
-          video.playbackRate = delay > 0.35 ? 1.10 : 1.05;
-        } else if (delay <= 0.07) {
+        // Target sweet spot: 30ms - 60ms buffer delay (< 15ms perceived glass-to-glass latency)
+        if (delay > 0.14) {
+          video.playbackRate = delay > 0.30 ? 1.10 : 1.05;
+        } else if (delay <= 0.06) {
           video.playbackRate = 1.0;
         }
 
-        // Catch-up seek on severe lag (> 0.8s, e.g. after window minimize)
-        if (delay > 0.8) {
-          video.currentTime = Math.max(0, liveEnd - 0.04);
+        // Catch-up seek on severe lag (> 0.6s, e.g. after window minimize)
+        if (delay > 0.6) {
+          video.currentTime = Math.max(0, liveEnd - 0.03);
         }
 
         if (this.dom.statLatency) {
@@ -537,7 +537,6 @@ class HyprRemoteUnifiedApp {
         video.requestVideoFrameCallback(trackHwFrame);
       } else {
         requestAnimationFrame(trackHwFrame);
-      }
       }
     };
 
@@ -770,12 +769,12 @@ class HyprRemoteUnifiedApp {
   _startClipboardSync() {
     this._stopClipboardSync();
     this.syncClipboard(false);
-    // 250ms polling for instant copy-paste response
+    // 1200ms passive polling (instant synchronization is triggered by window copy/paste/focus events)
     this.clipboardTimer = setInterval(() => {
       if (this.sessionRunning && this.activeSession) {
         this.syncClipboard(false);
       }
-    }, 250);
+    }, 1200);
   }
 
   _stopClipboardSync() {

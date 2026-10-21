@@ -216,14 +216,14 @@ pub fn spawn_h264_recorder_process() -> Result<tokio::process::Child, std::io::E
     }
 
     // If CPU fallback is needed, cap threads=4 to prevent stutter while avoiding thermal runaway
-    let cpu_fallback = "-c libx264 -b 0 -p preset=ultrafast -p tune=zerolatency -p g=60 -p threads=4";
+    let cpu_fallback = "-c libx264 -b 0 -p preset=ultrafast -p tune=zerolatency -p g=30 -p threads=4";
     let cpu_wf = format!("wf-recorder -D -y {} -m mpegts -r 120 -x yuv420p {} -f /dev/stdout", out_flag, cpu_fallback);
-    let vaapi_wf = format!("wf-recorder -D -y {} -m mpegts -r 120 -x yuv420p -c h264_vaapi -d {} -b 0 -p b=8M -p g=60 -f /dev/stdout", out_flag, vaapi_dev);
+    let vaapi_wf = format!("wf-recorder -D -y {} -m mpegts -r 120 -x yuv420p -c h264_vaapi -d {} -b 0 -p b=8M -p g=30 -f /dev/stdout", out_flag, vaapi_dev);
 
     let wf_cmd = if is_nvidia {
-        let nv_p1 = format!("wf-recorder -D -y {} -m mpegts -r 120 -x yuv420p -c h264_nvenc -b 0 -p preset=p1 -p tune=ull -p delay=0 -p zerolatency=1 -p b=8M -p maxrate=12M -p bufsize=1M -p g=60 -f /dev/stdout", out_flag);
-        let nv_fast = format!("wf-recorder -D -y {} -m mpegts -r 120 -x yuv420p -c h264_nvenc -b 0 -p preset=fast -p b=6M -p g=60 -f /dev/stdout", out_flag);
-        let nv_basic = format!("wf-recorder -D -y {} -m mpegts -r 120 -x yuv420p -c h264_nvenc -b 0 -p g=60 -f /dev/stdout", out_flag);
+        let nv_p1 = format!("wf-recorder -D -y {} -m mpegts -r 120 -x yuv420p -c h264_nvenc -b 0 -p preset=p1 -p tune=ull -p delay=0 -p zerolatency=1 -p b=8M -p maxrate=12M -p bufsize=1M -p g=30 -f /dev/stdout", out_flag);
+        let nv_fast = format!("wf-recorder -D -y {} -m mpegts -r 120 -x yuv420p -c h264_nvenc -b 0 -p preset=fast -p b=6M -p g=30 -f /dev/stdout", out_flag);
+        let nv_basic = format!("wf-recorder -D -y {} -m mpegts -r 120 -x yuv420p -c h264_nvenc -b 0 -p g=30 -f /dev/stdout", out_flag);
         if has_vaapi {
             format!("({} || {} || {} || {} || {})", nv_p1, nv_fast, nv_basic, vaapi_wf, cpu_wf)
         } else {
@@ -236,7 +236,7 @@ pub fn spawn_h264_recorder_process() -> Result<tokio::process::Child, std::io::E
     };
 
     let pipeline = format!(
-        "{} | ffmpeg -hide_banner -loglevel warning -fflags nobuffer+discardcorrupt -flags low_delay -probesize 32768 -analyzeduration 50000 -f mpegts -i - -c:v copy -flush_packets 1 -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof -frag_duration 33333 -",
+        "{} | ffmpeg -hide_banner -loglevel warning -avioflags direct -fflags nobuffer+discardcorrupt -flags low_delay -probesize 32768 -analyzeduration 50000 -f mpegts -i - -c:v copy -flush_packets 1 -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof -frag_duration 16667 -",
         wf_cmd
     );
 
