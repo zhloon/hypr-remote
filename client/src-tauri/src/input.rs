@@ -387,40 +387,6 @@ mod linux_impl {
         cmd
     }
 
-    fn find_hyprland_socket() -> Option<String> {
-        if let Ok(sig) = std::env::var("HYPRLAND_INSTANCE_SIGNATURE") {
-            if let Ok(runtime) = std::env::var("XDG_RUNTIME_DIR") {
-                let p = format!("{}/hypr/{}/.socket.sock", runtime, sig);
-                if std::path::Path::new(&p).exists() {
-                    return Some(p);
-                }
-            }
-            let p = format!("/tmp/hypr/{}/.socket.sock", sig);
-            if std::path::Path::new(&p).exists() {
-                return Some(p);
-            }
-        }
-        if let Ok(runtime) = std::env::var("XDG_RUNTIME_DIR") {
-            if let Ok(entries) = std::fs::read_dir(format!("{}/hypr", runtime)) {
-                for entry in entries.flatten() {
-                    let sock = entry.path().join(".socket.sock");
-                    if sock.exists() {
-                        return Some(sock.to_string_lossy().to_string());
-                    }
-                }
-            }
-        }
-        if let Ok(entries) = std::fs::read_dir("/tmp/hypr") {
-            for entry in entries.flatten() {
-                let sock = entry.path().join(".socket.sock");
-                if sock.exists() {
-                    return Some(sock.to_string_lossy().to_string());
-                }
-            }
-        }
-        None
-    }
-
     fn get_active_monitor_bounds() -> (f32, f32, i32, i32) {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

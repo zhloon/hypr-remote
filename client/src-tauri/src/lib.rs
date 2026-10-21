@@ -187,56 +187,52 @@ pub fn run() {
             // custom subview in tray-icon triggers _appearanceForNonVibrantContent -> _fauxVibrantDarkAppearance SIGABRT).
             // On macOS, HyprRemote runs as a standard desktop client with native window & dock.
             #[cfg(target_os = "linux")]
-            if let Some(icon) = _app.default_window_icon() {
-                if let Ok(show_i) = MenuItem::with_id(_app, "show", "🖥️ 显示主界面", true, None::<&str>) {
-                    if let Ok(quit_i) = MenuItem::with_id(_app, "quit", "❌ 彻底退出", true, None::<&str>) {
-                        if let Ok(menu) = Menu::with_items(_app, &[&show_i, &quit_i]) {
-                            let tray_builder = TrayIconBuilder::new()
-                                .icon(icon.clone())
-                                .menu(&menu)
-                                .show_menu_on_left_click(false)
-                                .on_menu_event(|app, event| {
-                                    match event.id.as_ref() {
-                                        "show" => {
-                                            if let Some(window) = app.get_webview_window("main") {
-                                                let _ = window.show();
-                                                let _ = window.set_focus();
+            {
+                let app_handle = _app.handle().clone();
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                    if let Some(icon) = app_handle.default_window_icon() {
+                        if let Ok(show_i) = MenuItem::with_id(&app_handle, "show", "🖥️ 显示主界面", true, None::<&str>) {
+                            if let Ok(quit_i) = MenuItem::with_id(&app_handle, "quit", "❌ 彻底退出", true, None::<&str>) {
+                                if let Ok(menu) = Menu::with_items(&app_handle, &[&show_i, &quit_i]) {
+                                    let tray_builder = TrayIconBuilder::new()
+                                        .icon(icon.clone())
+                                        .menu(&menu)
+                                        .show_menu_on_left_click(false)
+                                        .on_menu_event(|app, event| {
+                                            match event.id.as_ref() {
+                                                "show" => {
+                                                    if let Some(window) = app.get_webview_window("main") {
+                                                        let _ = window.show();
+                                                        let _ = window.set_focus();
+                                                    }
+                                                }
+                                                "quit" => {
+                                                    app.exit(0);
+                                                }
+                                                _ => {}
                                             }
-                                        }
-                                        "quit" => {
-                                            app.exit(0);
-                                        }
-                                        _ => {}
-                                    }
-                                })
-                                .on_tray_icon_event(|tray, event| {
-                                    if let TrayIconEvent::Click { button: MouseButton::Left, .. } = event {
-                                        let app = tray.app_handle();
-                                        if let Some(window) = app.get_webview_window("main") {
-                                            let _ = window.show();
-                                            let _ = window.set_focus();
-                                        }
-                                    }
-                                });
+                                        })
+                                        .on_tray_icon_event(|tray, event| {
+                                            if let TrayIconEvent::Click { button: MouseButton::Left, .. } = event {
+                                                let app = tray.app_handle();
+                                                if let Some(window) = app.get_webview_window("main") {
+                                                    let _ = window.show();
+                                                    let _ = window.set_focus();
+                                                }
+                                            }
+                                        });
 
-                            if let Err(e) = tray_builder.build(_app) {
-                                eprintln!("[Tray] System tray unavailable ({}), running without tray icon.", e);
+                                    let _ = tray_builder.build(&app_handle);
+                                }
                             }
                         }
                     }
-                }
+                }));
             }
 
             Ok(())
         })
-        .on_window_event(|_window, _event| {
-            // Close window -> on Linux minimize to background tray; on macOS close cleanly!
-            #[cfg(target_os = "linux")]
-            if let WindowEvent::CloseRequested { api, .. } = _event {
-                api.prevent_close();
-                let _ = _window.hide();
-            }
-        })
+        .on_window_event(|_window, _event| {})
         .invoke_handler(tauri::generate_handler![
             get_my_device_info,
             get_lan_devices,
