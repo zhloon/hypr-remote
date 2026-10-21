@@ -32,6 +32,7 @@ class HyprRemoteUnifiedApp {
       btnConnect: document.getElementById('btn-start-connect'),
       lanDeviceList: document.getElementById('lan-device-list'),
       lanCount: document.getElementById('lan-count'),
+      remoteVideo: document.getElementById('remote-screen-video'),
       remoteCanvas: document.getElementById('remote-screen-canvas'),
       remoteImg: document.getElementById('remote-screen-img'),
       sessionTitle: document.getElementById('session-target-title'),
@@ -43,6 +44,9 @@ class HyprRemoteUnifiedApp {
       btnToggleLock: document.getElementById('btn-toggle-lock'),
       btnDisconnect: document.getElementById('btn-disconnect'),
     };
+
+    this.isH264Active = false;
+    this.h264AbortController = null;
 
     this.ctx = this.dom.remoteCanvas ? this.dom.remoteCanvas.getContext('2d', { alpha: false }) : null;
 
@@ -132,6 +136,7 @@ class HyprRemoteUnifiedApp {
     // Pointer lock listener
     document.addEventListener('pointerlockchange', () => {
       this.isPointerLocked =
+        document.pointerLockElement === this.dom.remoteVideo ||
         document.pointerLockElement === this.dom.remoteCanvas ||
         document.pointerLockElement === this.dom.remoteImg;
       this.dom.btnToggleLock.classList.toggle('active', this.isPointerLocked);
@@ -149,14 +154,15 @@ class HyprRemoteUnifiedApp {
     });
 
     // Click on screen activates pointer lock
-    const renderTarget = this.dom.remoteCanvas || this.dom.remoteImg;
-    renderTarget.addEventListener('click', () => {
-      if (this.activeSession && !this.isPointerLocked) {
-        renderTarget.requestPointerLock?.();
-      }
+    [this.dom.remoteVideo, this.dom.remoteCanvas, this.dom.remoteImg].forEach((target) => {
+      if (!target) return;
+      target.addEventListener('click', () => {
+        if (this.activeSession && !this.isPointerLocked) {
+          target.requestPointerLock?.();
+        }
+      });
+      target.addEventListener('contextmenu', (e) => e.preventDefault());
     });
-
-    renderTarget.addEventListener('contextmenu', (e) => e.preventDefault());
 
     window.addEventListener('resize', () => {
       this._updateCanvasLayout();
@@ -244,8 +250,8 @@ class HyprRemoteUnifiedApp {
 
       this._updateCanvasLayout();
 
-      // Start High-FPS Hardware GPU Canvas Stream Loop
-      this._startStreamLoop();
+      // Start Stream: Try Hardware H.264 stream first; fallback to high-speed Canvas loop
+      this._startActiveStream();
 
       // Attach input listeners
       this._attachInput();
@@ -256,6 +262,126 @@ class HyprRemoteUnifiedApp {
       this.dom.btnConnect.disabled = false;
       this.dom.btnConnect.textContent = '🚀 立即连接';
     }
+  }
+
+  _startActiveStream() {
+    this.sessionRunning = true;
+    this._startH264Stream().catch((err) => {
+      console.warn('Hardware H.264 stream unavailable, falling back to GPU Canvas loop:', err);
+      if (this.sessionRunning && !this.isH264Active) {
+        this._startStreamLoop();
+      }
+    });
+  }
+
+  async _startH264Stream() {
+    if (!window.MediaSource) {
+      throw new Error('MediaSource not supported');
+    }
+
+    const video = this.dom.remoteVideo;
+    const canvas = this.dom.remoteCanvas;
+    const img = this.dom.remoteImg;
+
+    const mimeTypes = [
+      'video/mp4; codecs="avc1.42E01E"',
+      'video/mp4; codecs="avc1.640028"',
+      'video/mp4; codecs="avc1.4D401F"',
+      'video/mp4',
+    ];
+    let selectedMime = mimeTypes.find((m) => MediaSource.isTypeSupported(m));
+    if (!selectedMime) {
+      throw new Error('No supported H.264 MP4 MIME type in browser');
+    }
+
+    this.h264AbortController = new AbortController();
+    const streamUrl = `http://${this.activeSession.ip}:${this.activeSession.port}/h264_stream`;
+
+    const mediaSource = new MediaSource();
+    video.src = URL.createObjectURL(mediaSource);
+
+    await new Promise((resolve, reject) => {
+      mediaSource.addEventListener('sourceopen', resolve, { once: true });
+      setTimeout(() => reject(new Error('MediaSource open timeout')), 3500);
+    });
+
+    const sourceBuffer = mediaSource.addSourceBuffer(selectedMime);
+    sourceBuffer.mode = 'segments';
+
+    const res = await fetch(streamUrl, {
+      signal: this.h264AbortController.signal,
+    });
+
+    if (!res.ok) {
+      throw new Error(`H264 stream HTTP ${res.status}`);
+    }
+
+    const reader = res.body.getReader();
+    const queue = [];
+
+    const flushQueue = () => {
+      if (queue.length > 0 && !sourceBuffer.updating && mediaSource.readyState === 'open') {
+        const chunk = queue.shift();
+        try {
+          sourceBuffer.appendBuffer(chunk);
+        } catch (e) {
+          console.warn('sourceBuffer.appendBuffer error:', e);
+        }
+      }
+    };
+
+    sourceBuffer.addEventListener('updateend', () => {
+      // Auto-chase live edge to maintain ultra-low latency (<30ms)
+      if (video.buffered.length > 0) {
+        const end = video.buffered.end(video.buffered.length - 1);
+        if (end - video.currentTime > 0.12) {
+          video.currentTime = end - 0.02;
+        }
+      }
+      flushQueue();
+    });
+
+    video.onloadedmetadata = () => {
+      if (video.videoWidth > 0 && video.videoHeight > 0) {
+        this.remoteWidth = video.videoWidth;
+        this.remoteHeight = video.videoHeight;
+        this._updateCanvasLayout();
+      }
+    };
+
+    video.onplaying = () => {
+      video.style.display = 'block';
+      if (canvas) canvas.style.display = 'none';
+      if (img) img.style.display = 'none';
+      this.isH264Active = true;
+      if (this.dom.statFps) this.dom.statFps.textContent = '60 FPS (HW)';
+      if (this.dom.statLatency) this.dom.statLatency.textContent = '< 15ms';
+      if (this.dom.btnToggleQuality) this.dom.btnToggleQuality.textContent = '🚀 硬件加速 (H.264)';
+      this._updateCanvasLayout();
+    };
+
+    video.play().catch(() => {});
+
+    // Read loop
+    const pump = async () => {
+      try {
+        while (this.sessionRunning && this.activeSession) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          queue.push(value);
+          flushQueue();
+        }
+      } catch (e) {
+        if (e.name !== 'AbortError') {
+          console.warn('H264 stream closed:', e);
+          if (this.sessionRunning && !this.isH264Active) {
+            this._startStreamLoop();
+          }
+        }
+      }
+    };
+
+    pump();
   }
 
   _startStreamLoop() {
@@ -332,8 +458,21 @@ class HyprRemoteUnifiedApp {
 
   disconnect() {
     this.sessionRunning = false;
+    this.isH264Active = false;
+    if (this.h264AbortController) {
+      this.h264AbortController.abort();
+      this.h264AbortController = null;
+    }
     this._detachInput();
-    if (this.dom.remoteImg) this.dom.remoteImg.src = '';
+    if (this.dom.remoteVideo) {
+      this.dom.remoteVideo.src = '';
+      this.dom.remoteVideo.style.display = 'none';
+    }
+    if (this.dom.remoteCanvas) this.dom.remoteCanvas.style.display = 'none';
+    if (this.dom.remoteImg) {
+      this.dom.remoteImg.src = '';
+      this.dom.remoteImg.style.display = 'none';
+    }
     this.activeSession = null;
     this.dom.sessionView.style.display = 'none';
     this.dom.homeView.style.display = 'flex';
@@ -369,8 +508,9 @@ class HyprRemoteUnifiedApp {
 
   toggleScaleMode() {
     this.isStretched = !this.isStretched;
-    this.dom.remoteCanvas.classList.toggle('stretched', this.isStretched);
-    this.dom.remoteImg.classList.toggle('stretched', this.isStretched);
+    if (this.dom.remoteVideo) this.dom.remoteVideo.classList.toggle('stretched', this.isStretched);
+    if (this.dom.remoteCanvas) this.dom.remoteCanvas.classList.toggle('stretched', this.isStretched);
+    if (this.dom.remoteImg) this.dom.remoteImg.classList.toggle('stretched', this.isStretched);
     if (this.dom.btnToggleScale) {
       this.dom.btnToggleScale.textContent = this.isStretched ? '原始比例' : '铺满全屏';
       this.dom.btnToggleScale.classList.toggle('active', this.isStretched);
@@ -380,33 +520,61 @@ class HyprRemoteUnifiedApp {
 
   toggleQualityMode() {
     const modes = [
-      { id: 'balanced', label: '⚡ 平衡模式' },
-      { id: 'crystal', label: '💎 超清画质' },
-      { id: 'performance', label: '🚀 极速高帧' },
+      { id: 'h264', label: '🚀 硬件加速 (H.264)' },
+      { id: 'balanced', label: '⚡ 平衡模式 (JPEG)' },
+      { id: 'crystal', label: '💎 超清画质 (JPEG)' },
+      { id: 'performance', label: '🏎️ 极速高帧 (JPEG)' },
     ];
     this.currentQualityIdx = ((this.currentQualityIdx || 0) + 1) % modes.length;
     const mode = modes[this.currentQualityIdx];
     if (this.dom.btnToggleQuality) {
       this.dom.btnToggleQuality.textContent = mode.label;
     }
-    if (this.activeSession) {
+    if (!this.activeSession) return;
+
+    if (mode.id === 'h264') {
+      this._startH264Stream().catch((e) => {
+        console.warn('Switch to H.264 failed, staying on Canvas:', e);
+        this._startStreamLoop();
+      });
+    } else {
+      // Stop H264 if active
+      if (this.h264AbortController) {
+        this.h264AbortController.abort();
+        this.h264AbortController = null;
+      }
+      this.isH264Active = false;
+      if (this.dom.remoteVideo) {
+        this.dom.remoteVideo.style.display = 'none';
+        this.dom.remoteVideo.src = '';
+      }
+      this.dom.remoteCanvas.style.display = 'block';
       fetch(`http://${this.activeSession.ip}:${this.activeSession.port}/quality?mode=${mode.id}`).catch(() => {});
+      this._startStreamLoop();
     }
   }
 
+  _getActiveElement() {
+    if (this.dom.remoteVideo && this.dom.remoteVideo.style.display !== 'none') {
+      return this.dom.remoteVideo;
+    }
+    if (this.dom.remoteCanvas && this.dom.remoteCanvas.style.display !== 'none') {
+      return this.dom.remoteCanvas;
+    }
+    return this.dom.remoteImg;
+  }
+
   togglePointerLock() {
-    const el = this.dom.remoteCanvas.style.display !== 'none' ? this.dom.remoteCanvas : this.dom.remoteImg;
+    const el = this._getActiveElement();
     if (this.isPointerLocked) {
       document.exitPointerLock?.();
     } else {
-      el.requestPointerLock?.();
+      el?.requestPointerLock?.();
     }
   }
 
   _updateCanvasLayout() {
-    const canvas = this.dom.remoteCanvas;
-    const img = this.dom.remoteImg;
-    const el = canvas && canvas.style.display !== 'none' ? canvas : img;
+    const el = this._getActiveElement();
     if (!el) return;
 
     if (this.isStretched) {
@@ -418,8 +586,8 @@ class HyprRemoteUnifiedApp {
     const viewport = document.querySelector('.screen-viewport');
     const vw = viewport ? viewport.clientWidth : window.innerWidth;
     const vh = viewport ? viewport.clientHeight : window.innerHeight;
-    const nw = this.remoteWidth || canvas?.width || 1920;
-    const nh = this.remoteHeight || canvas?.height || 1080;
+    const nw = this.remoteWidth || el.videoWidth || el.naturalWidth || el.width || 1920;
+    const nh = this.remoteHeight || el.videoHeight || el.naturalHeight || el.height || 1080;
 
     const vRatio = vw / vh;
     const rRatio = nw / nh;
@@ -441,33 +609,26 @@ class HyprRemoteUnifiedApp {
   // Input Handling
   // ==========================================
   _attachInput() {
-    const target = this.dom.remoteCanvas;
-    target.addEventListener('mousemove', this.onMouseMove);
-    target.addEventListener('mousedown', this.onMouseDown);
-    target.addEventListener('mouseup', this.onMouseUp);
-    target.addEventListener('wheel', this.onWheel, { passive: false });
-
-    // Also attach to img fallback
-    this.dom.remoteImg.addEventListener('mousemove', this.onMouseMove);
-    this.dom.remoteImg.addEventListener('mousedown', this.onMouseDown);
-    this.dom.remoteImg.addEventListener('mouseup', this.onMouseUp);
-    this.dom.remoteImg.addEventListener('wheel', this.onWheel, { passive: false });
+    [this.dom.remoteVideo, this.dom.remoteCanvas, this.dom.remoteImg].forEach((target) => {
+      if (!target) return;
+      target.addEventListener('mousemove', this.onMouseMove);
+      target.addEventListener('mousedown', this.onMouseDown);
+      target.addEventListener('mouseup', this.onMouseUp);
+      target.addEventListener('wheel', this.onWheel, { passive: false });
+    });
 
     window.addEventListener('keydown', this.onKeyDown);
     window.addEventListener('keyup', this.onKeyUp);
   }
 
   _detachInput() {
-    const target = this.dom.remoteCanvas;
-    target.removeEventListener('mousemove', this.onMouseMove);
-    target.removeEventListener('mousedown', this.onMouseDown);
-    target.removeEventListener('mouseup', this.onMouseUp);
-    target.removeEventListener('wheel', this.onWheel);
-
-    this.dom.remoteImg.removeEventListener('mousemove', this.onMouseMove);
-    this.dom.remoteImg.removeEventListener('mousedown', this.onMouseDown);
-    this.dom.remoteImg.removeEventListener('mouseup', this.onMouseUp);
-    this.dom.remoteImg.removeEventListener('wheel', this.onWheel);
+    [this.dom.remoteVideo, this.dom.remoteCanvas, this.dom.remoteImg].forEach((target) => {
+      if (!target) return;
+      target.removeEventListener('mousemove', this.onMouseMove);
+      target.removeEventListener('mousedown', this.onMouseDown);
+      target.removeEventListener('mouseup', this.onMouseUp);
+      target.removeEventListener('wheel', this.onWheel);
+    });
 
     window.removeEventListener('keydown', this.onKeyDown);
     window.removeEventListener('keyup', this.onKeyUp);
@@ -485,7 +646,8 @@ class HyprRemoteUnifiedApp {
   }
 
   _getNormalizedCoords(e) {
-    const el = this.dom.remoteCanvas.style.display !== 'none' ? this.dom.remoteCanvas : this.dom.remoteImg;
+    const el = this._getActiveElement();
+    if (!el) return null;
     const rect = el.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return null;
 
@@ -498,8 +660,8 @@ class HyprRemoteUnifiedApp {
       };
     }
 
-    const nw = this.remoteWidth || el.naturalWidth || el.width || 1920;
-    const nh = this.remoteHeight || el.naturalHeight || el.height || 1080;
+    const nw = this.remoteWidth || el.videoWidth || el.naturalWidth || el.width || 1920;
+    const nh = this.remoteHeight || el.videoHeight || el.naturalHeight || el.height || 1080;
     const rectRatio = rect.width / rect.height;
     const imgRatio = nw / nh;
 

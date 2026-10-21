@@ -250,7 +250,49 @@ impl EmbeddedHostServer {
                 {\"status\":\"ok\"}";
             let _ = stream.write_all(response.as_bytes()).await;
         }
-        // 6. Ping / Info: GET /info
+        // 6. Ultra-Low-Latency Hardware H.264 Video Stream: GET /h264_stream
+        else if method == "GET" && path.starts_with("/h264_stream") {
+            let mut child = match crate::capture::spawn_h264_recorder_process() {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("[H264] Failed to spawn H.264 recorder: {}", e);
+                    let response = "HTTP/1.1 503 Service Unavailable\r\n\
+                        Content-Type: text/plain\r\n\
+                        Access-Control-Allow-Origin: *\r\n\
+                        Content-Length: 29\r\n\r\n\
+                        H.264 recorder not available";
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    return;
+                }
+            };
+
+            let mut stdout = match child.stdout.take() {
+                Some(s) => s,
+                None => return,
+            };
+
+            let header = "HTTP/1.1 200 OK\r\n\
+                Content-Type: video/mp4\r\n\
+                Connection: close\r\n\
+                Cache-Control: no-cache, no-store, must-revalidate\r\n\
+                Pragma: no-cache\r\n\
+                Expires: 0\r\n\
+                Access-Control-Allow-Origin: *\r\n\r\n";
+
+            if stream.write_all(header.as_bytes()).await.is_err() {
+                let _ = child.kill().await;
+                return;
+            }
+
+            println!("[H264] Live H.264 hardware video stream started for client");
+
+            // Pipe encoder stdout directly into client TCP socket
+            let _ = tokio::io::copy(&mut stdout, &mut stream).await;
+
+            let _ = child.kill().await;
+            println!("[H264] Client disconnected, stopped H.264 recorder");
+        }
+        // 7. Ping / Info: GET /info
         else if method == "GET" && path.starts_with("/info") {
             let mut info = self.my_info.clone();
             info.local_ip = crate::discovery::get_local_ip();

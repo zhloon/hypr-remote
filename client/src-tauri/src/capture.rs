@@ -190,4 +190,47 @@ pub fn capture_desktop_frame() -> (Vec<u8>, &'static str) {
     (FALLBACK_JPEG.to_vec(), "image/jpeg")
 }
 
+#[cfg(target_os = "linux")]
+pub fn spawn_h264_recorder_process() -> Result<tokio::process::Child, std::io::Error> {
+    let mut cmd = tokio::process::Command::new("wf-recorder");
+    cmd.arg("-m").arg("mp4");
+    cmd.arg("--muxer-param=movflags=frag_keyframe+empty_moov+default_base_moof");
+    cmd.arg("-x").arg("yuv420p");
+    cmd.arg("-p").arg("tune=zerolatency");
+    cmd.arg("-F").arg("fps=60");
+
+    // Detect hardware acceleration device
+    if std::path::Path::new("/proc/driver/nvidia/version").exists() {
+        println!("[H264] Detected NVIDIA GPU -> Using h264_nvenc");
+        cmd.arg("-c").arg("h264_nvenc");
+        cmd.arg("-p").arg("preset=p1");
+    } else if std::path::Path::new("/dev/dri/renderD128").exists() {
+        println!("[H264] Detected VA-API GPU (/dev/dri/renderD128) -> Using h264_vaapi");
+        cmd.arg("-c").arg("h264_vaapi");
+        cmd.arg("-d").arg("/dev/dri/renderD128");
+    } else if std::path::Path::new("/dev/dri/renderD129").exists() {
+        println!("[H264] Detected VA-API GPU (/dev/dri/renderD129) -> Using h264_vaapi");
+        cmd.arg("-c").arg("h264_vaapi");
+        cmd.arg("-d").arg("/dev/dri/renderD129");
+    } else {
+        println!("[H264] No dedicated hardware encoder node -> Using libx264 ultrafast");
+        cmd.arg("-c").arg("libx264");
+        cmd.arg("-p").arg("preset=ultrafast");
+    }
+
+    cmd.arg("-f").arg("-");
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::null());
+
+    cmd.spawn()
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn spawn_h264_recorder_process() -> Result<tokio::process::Child, std::io::Error> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "Hardware H.264 stream via wf-recorder is designed for Linux / Hyprland hosts",
+    ))
+}
+
 

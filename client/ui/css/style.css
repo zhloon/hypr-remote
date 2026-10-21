@@ -446,6 +446,7 @@ body {
   position: relative;
 }
 
+#remote-screen-video,
 #remote-screen-canvas,
 #remote-screen-img {
   max-width: 100vw;
@@ -456,6 +457,7 @@ body {
   transform: translateZ(0);
 }
 
+#remote-screen-video.stretched,
 #remote-screen-canvas.stretched,
 #remote-screen-img.stretched {
   width: 100vw !important;
