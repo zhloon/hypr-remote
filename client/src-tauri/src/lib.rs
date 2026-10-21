@@ -180,44 +180,47 @@ pub fn run() {
             disc_clone.start_background();
             server_clone.start_background();
 
-            // 1. Setup Tray Menu
-            let show_i = MenuItem::with_id(app, "show", "🖥️ 显示主界面", true, None::<&str>)?;
-            let quit_i = MenuItem::with_id(app, "quit", "❌ 彻底退出", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show_i, &quit_i])?;
+            // 1. Setup Tray Menu (non-fatal if system tray daemon is not present)
+            if let Ok(show_i) = MenuItem::with_id(app, "show", "🖥️ 显示主界面", true, None::<&str>) {
+                if let Ok(quit_i) = MenuItem::with_id(app, "quit", "❌ 彻底退出", true, None::<&str>) {
+                    if let Ok(menu) = Menu::with_items(app, &[&show_i, &quit_i]) {
+                        let mut tray_builder = TrayIconBuilder::new()
+                            .menu(&menu)
+                            .show_menu_on_left_click(false)
+                            .on_menu_event(|app, event| {
+                                match event.id.as_ref() {
+                                    "show" => {
+                                        if let Some(window) = app.get_webview_window("main") {
+                                            let _ = window.show();
+                                            let _ = window.set_focus();
+                                        }
+                                    }
+                                    "quit" => {
+                                        app.exit(0);
+                                    }
+                                    _ => {}
+                                }
+                            })
+                            .on_tray_icon_event(|tray, event| {
+                                if let TrayIconEvent::Click { button: MouseButton::Left, .. } = event {
+                                    let app = tray.app_handle();
+                                    if let Some(window) = app.get_webview_window("main") {
+                                        let _ = window.show();
+                                        let _ = window.set_focus();
+                                    }
+                                }
+                            });
 
-            // 2. Build Tray Icon for background persistence
-            let mut tray_builder = TrayIconBuilder::new()
-                .menu(&menu)
-                .show_menu_on_left_click(false)
-                .on_menu_event(|app, event| {
-                    match event.id.as_ref() {
-                        "show" => {
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.show();
-                                let _ = window.set_focus();
-                            }
+                        if let Some(icon) = app.default_window_icon() {
+                            tray_builder = tray_builder.icon(icon.clone());
                         }
-                        "quit" => {
-                            app.exit(0);
-                        }
-                        _ => {}
-                    }
-                })
-                .on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::Click { button: MouseButton::Left, .. } = event {
-                        let app = tray.app_handle();
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
-                    }
-                });
 
-            if let Some(icon) = app.default_window_icon() {
-                tray_builder = tray_builder.icon(icon.clone());
+                        if let Err(e) = tray_builder.build(app) {
+                            eprintln!("[Tray] System tray unavailable on this desktop environment ({}), continuing without tray icon.", e);
+                        }
+                    }
+                }
             }
-
-            tray_builder.build(app)?;
 
             Ok(())
         })

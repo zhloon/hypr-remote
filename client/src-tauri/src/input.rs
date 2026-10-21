@@ -355,9 +355,15 @@ mod linux_impl {
     static MOVE_LOG_COUNTER: AtomicU32 = AtomicU32::new(0);
 
     fn get_uinput() -> std::sync::MutexGuard<'static, Option<UinputDevice>> {
-        let mut guard = UINPUT.lock().unwrap();
+        let mut guard = match UINPUT.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         if !UINPUT_INITIALIZED.swap(true, Ordering::SeqCst) {
-            *guard = UinputDevice::open();
+            let res = std::panic::catch_unwind(|| {
+                UinputDevice::open()
+            });
+            *guard = res.unwrap_or(None);
         }
         guard
     }
