@@ -1,7 +1,7 @@
 export class WebRTCClient {
   constructor(options = {}) {
     this.options = {
-      fps: 60,
+      fps: 120,
       bitrateKbps: 25000,
       ...options
     };

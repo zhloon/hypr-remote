@@ -50,8 +50,8 @@ class HyprRemoteUnifiedApp {
     this.isH264Active = false;
     this.h264AbortController = null;
     this.qualityModes = [
-      { id: 'h264', label: '🚀 硬件加速 (H.264 60fps)' },
-      { id: 'performance', label: '🏎️ 极速高帧 (GPU 60fps)' },
+      { id: 'h264', label: '🚀 硬件加速 (H.264 120fps)' },
+      { id: 'performance', label: '🏎️ 极速高帧 (GPU 120fps)' },
       { id: 'balanced', label: '⚡ 平衡画质 (GPU)' },
       { id: 'crystal', label: '💎 超清画质 (100% 2K/4K)' },
     ];
@@ -512,7 +512,7 @@ class HyprRemoteUnifiedApp {
       if (img) img.style.display = 'none';
       this.isH264Active = true;
       this.currentQualityIdx = 0;
-      if (this.dom.statFps) this.dom.statFps.textContent = '60 FPS (HW)';
+      if (this.dom.statFps) this.dom.statFps.textContent = '120 FPS (HW)';
       if (this.dom.statLatency) this.dom.statLatency.textContent = '< 15ms';
       if (this.dom.btnToggleQuality) this.dom.btnToggleQuality.textContent = this.qualityModes[0].label;
       this._updateCanvasLayout();

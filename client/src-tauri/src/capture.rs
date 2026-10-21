@@ -204,34 +204,34 @@ pub fn spawn_h264_recorder_process() -> Result<tokio::process::Child, std::io::E
     };
 
     let (hw_args, has_hw) = if std::path::Path::new("/proc/driver/nvidia/version").exists() {
-        println!("[H264/GPU] Detected NVIDIA GPU -> Using h264_nvenc (Hardware Acceleration, 60fps, Ultra-Low Latency)");
-        ("-c h264_nvenc -b 0 -p preset=p1 -p tune=ull -p g=15", true)
+        println!("[H264/GPU] Detected NVIDIA GPU -> Using h264_nvenc (Hardware Acceleration, 120fps, Ultra-Low Latency)");
+        ("-c h264_nvenc -b 0 -p preset=p1 -p tune=ull -p g=30", true)
     } else if std::path::Path::new("/dev/dri/renderD128").exists() {
-        println!("[H264/GPU] Detected VA-API GPU (/dev/dri/renderD128) -> Using h264_vaapi (Hardware Acceleration, 60fps, Zero-Copy)");
-        ("-c h264_vaapi -d /dev/dri/renderD128 -b 0 -p g=15", true)
+        println!("[H264/GPU] Detected VA-API GPU (/dev/dri/renderD128) -> Using h264_vaapi (Hardware Acceleration, 120fps, Zero-Copy)");
+        ("-c h264_vaapi -d /dev/dri/renderD128 -b 0 -p g=30", true)
     } else if std::path::Path::new("/dev/dri/renderD129").exists() {
-        println!("[H264/GPU] Detected VA-API GPU (/dev/dri/renderD129) -> Using h264_vaapi (Hardware Acceleration, 60fps, Zero-Copy)");
-        ("-c h264_vaapi -d /dev/dri/renderD129 -b 0 -p g=15", true)
+        println!("[H264/GPU] Detected VA-API GPU (/dev/dri/renderD129) -> Using h264_vaapi (Hardware Acceleration, 120fps, Zero-Copy)");
+        ("-c h264_vaapi -d /dev/dri/renderD129 -b 0 -p g=30", true)
     } else {
-        println!("[H264/CPU] No dedicated hardware encoder node -> Using libx264 ultrafast (60fps, capped 2 threads)");
-        ("-c libx264 -b 0 -p preset=ultrafast -p tune=zerolatency -p g=15 -p threads=2", false)
+        println!("[H264/CPU] No dedicated hardware encoder node -> Using libx264 ultrafast (120fps, capped 2 threads)");
+        ("-c libx264 -b 0 -p preset=ultrafast -p tune=zerolatency -p g=30 -p threads=2", false)
     };
 
     // If CPU fallback is needed, cap threads=2 to prevent 300%+ CPU throttling / thermal runaway!
-    let cpu_fallback = "-c libx264 -b 0 -p preset=ultrafast -p tune=zerolatency -p g=15 -p threads=2";
+    let cpu_fallback = "-c libx264 -b 0 -p preset=ultrafast -p tune=zerolatency -p g=30 -p threads=2";
 
-    let primary_wf = format!("wf-recorder -D -y {} -m mpegts -r 60 {} -f /dev/stdout", out_flag, hw_args);
-    let cpu_wf = format!("wf-recorder -D -y {} -m mpegts -r 60 {} -f /dev/stdout", out_flag, cpu_fallback);
+    let primary_wf = format!("wf-recorder -D -y {} -m mpegts -r 120 {} -f /dev/stdout", out_flag, hw_args);
+    let cpu_wf = format!("wf-recorder -D -y {} -m mpegts -r 120 {} -f /dev/stdout", out_flag, cpu_fallback);
 
     let is_nvidia = std::path::Path::new("/proc/driver/nvidia/version").exists();
     let has_vaapi = std::path::Path::new("/dev/dri/renderD128").exists() || std::path::Path::new("/dev/dri/renderD129").exists();
     let vaapi_dev = if std::path::Path::new("/dev/dri/renderD128").exists() { "/dev/dri/renderD128" } else { "/dev/dri/renderD129" };
-    let vaapi_wf = format!("wf-recorder -D -y {} -m mpegts -r 60 -c h264_vaapi -d {} -b 0 -p g=15 -f /dev/stdout", out_flag, vaapi_dev);
+    let vaapi_wf = format!("wf-recorder -D -y {} -m mpegts -r 120 -c h264_vaapi -d {} -b 0 -p g=30 -f /dev/stdout", out_flag, vaapi_dev);
 
     let wf_cmd = if is_nvidia {
-        let nv_p1 = format!("wf-recorder -D -y {} -m mpegts -r 60 -c h264_nvenc -b 0 -p preset=p1 -p tune=ull -p g=15 -f /dev/stdout", out_flag);
-        let nv_fast = format!("wf-recorder -D -y {} -m mpegts -r 60 -c h264_nvenc -b 0 -p preset=fast -p g=15 -f /dev/stdout", out_flag);
-        let nv_basic = format!("wf-recorder -D -y {} -m mpegts -r 60 -c h264_nvenc -b 0 -p g=15 -f /dev/stdout", out_flag);
+        let nv_p1 = format!("wf-recorder -D -y {} -m mpegts -r 120 -c h264_nvenc -b 0 -p preset=p1 -p tune=ull -p g=30 -f /dev/stdout", out_flag);
+        let nv_fast = format!("wf-recorder -D -y {} -m mpegts -r 120 -c h264_nvenc -b 0 -p preset=fast -p g=30 -f /dev/stdout", out_flag);
+        let nv_basic = format!("wf-recorder -D -y {} -m mpegts -r 120 -c h264_nvenc -b 0 -p g=30 -f /dev/stdout", out_flag);
         if has_vaapi {
             format!("({} || {} || {} || {} || {})", nv_p1, nv_fast, nv_basic, vaapi_wf, cpu_wf)
         } else {
@@ -244,7 +244,7 @@ pub fn spawn_h264_recorder_process() -> Result<tokio::process::Child, std::io::E
     };
 
     let pipeline = format!(
-        "{} | ffmpeg -hide_banner -loglevel warning -fflags nobuffer -flags low_delay -probesize 65536 -analyzeduration 100000 -f mpegts -i - -c:v copy -flush_packets 1 -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof -frag_duration 16666 -",
+        "{} | ffmpeg -hide_banner -loglevel warning -fflags nobuffer -flags low_delay -probesize 65536 -analyzeduration 100000 -f mpegts -i - -c:v copy -flush_packets 1 -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof -frag_duration 8333 -",
         wf_cmd
     );
 
@@ -302,8 +302,8 @@ pub fn set_screen_resolution(res: &str) -> bool {
         .args(["output", "create", "headless", "HEADLESS-1"])
         .status();
 
-    // 2. Configure headless monitor resolution (e.g. HEADLESS-1,2560x1440@60,auto,1)
-    let mon_arg = format!("HEADLESS-1,{}@60,auto,1", res);
+    // 2. Configure headless monitor resolution (e.g. HEADLESS-1,2560x1440@120,auto,1)
+    let mon_arg = format!("HEADLESS-1,{}@120,auto,1", res);
     let _ = std::process::Command::new("hyprctl")
         .args(["keyword", "monitor", &mon_arg])
         .status();

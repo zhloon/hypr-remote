@@ -42,7 +42,7 @@ impl EmbeddedHostServer {
             std::thread::Builder::new()
                 .name("capture-engine".into())
                 .spawn(move || {
-                    let target_interval = Duration::from_millis(16); // Target ~60 FPS
+                    let target_interval = Duration::from_millis(8); // Target ~120 FPS
                     loop {
                         // If GPU H.264 stream is running, completely sleep this thread! Zero CPU usage!
                         if H264_STREAM_ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
