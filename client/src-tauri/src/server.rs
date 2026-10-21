@@ -11,6 +11,7 @@ use tokio::sync::watch;
 use crate::types::MyDeviceInfo;
 
 pub static LAST_CLIENT_FRAME_TIME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static H264_STREAM_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub struct EmbeddedHostServer {
     pub port: u16,
@@ -43,12 +44,18 @@ impl EmbeddedHostServer {
                 .spawn(move || {
                     let target_interval = Duration::from_millis(16); // Target ~60 FPS
                     loop {
+                        // If GPU H.264 stream is running, completely sleep this thread! Zero CPU usage!
+                        if H264_STREAM_ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
+                            std::thread::sleep(Duration::from_millis(300));
+                            continue;
+                        }
+
                         let now = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
                             .as_secs();
                         let last = LAST_CLIENT_FRAME_TIME.load(std::sync::atomic::Ordering::Relaxed);
-                        if tx.receiver_count() > 1 || now.saturating_sub(last) < 4 {
+                        if tx.receiver_count() > 1 || now.saturating_sub(last) < 2 {
                             let start = std::time::Instant::now();
                             let (frame_bytes, _) = capture_desktop_frame();
                             if !frame_bytes.is_empty() {
@@ -364,6 +371,15 @@ impl EmbeddedHostServer {
         }
         // 6. Ultra-Low-Latency Hardware H.264 Video Stream: GET /h264_stream
         else if method == "GET" && path.starts_with("/h264_stream") {
+            H264_STREAM_ACTIVE.store(true, std::sync::atomic::Ordering::Relaxed);
+            struct H264ActiveGuard;
+            impl Drop for H264ActiveGuard {
+                fn drop(&mut self) {
+                    H264_STREAM_ACTIVE.store(false, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            let _h264_guard = H264ActiveGuard;
+
             let mut child = match crate::capture::spawn_h264_recorder_process() {
                 Ok(c) => c,
                 Err(e) => {

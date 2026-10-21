@@ -356,28 +356,53 @@ body {
   overflow: hidden;
 }
 
-.session-nav {
+.nav-trigger-handle {
   position: absolute;
-  top: 10px;
+  top: 0;
   left: 50%;
   transform: translateX(-50%);
+  width: 90px;
+  height: 5px;
+  background: rgba(255, 255, 255, 0.22);
+  border-radius: 0 0 6px 6px;
+  z-index: 999;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+.nav-trigger-handle:hover {
+  background: var(--primary);
+  width: 120px;
+  height: 8px;
+  box-shadow: 0 0 12px rgba(41, 121, 255, 0.6);
+}
+
+.session-nav {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  transform: translate(-50%, -100%);
   z-index: 1000;
-  background: rgba(18, 22, 34, 0.90);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
+  background: rgba(15, 18, 28, 0.94);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
   border: 1px solid var(--border);
-  border-radius: 30px;
-  padding: 6px 18px;
+  border-top: none;
+  border-radius: 0 0 20px 20px;
+  padding: 8px 22px;
   display: flex;
   align-items: center;
   gap: 16px;
-  box-shadow: 0 10px 30px rgba(0,0,0,0.6);
-  opacity: 0.25;
-  transition: opacity 0.2s ease, transform 0.2s ease;
+  box-shadow: 0 12px 36px rgba(0,0,0,0.7);
+  opacity: 0;
+  pointer-events: none;
+  transition: transform 0.26s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.2s ease;
 }
-.session-nav:hover,
-.session-nav.expanded {
+
+.session-nav.visible,
+.session-nav:hover {
+  transform: translate(-50%, 0);
   opacity: 1;
+  pointer-events: auto;
 }
 
 .session-info {
