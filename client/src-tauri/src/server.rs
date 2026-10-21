@@ -323,10 +323,12 @@ impl EmbeddedHostServer {
                 None => return,
             };
 
-            // Pre-read first fragment with 2.5s timeout to guarantee encoder is producing valid data!
+            let _ = stream.set_nodelay(true);
+
+            // Pre-read first fragment with 4.5s timeout to guarantee encoder is producing valid data!
             let mut first_chunk = [0u8; 8192];
             let first_bytes = match tokio::time::timeout(
-                Duration::from_millis(2500),
+                Duration::from_millis(4500),
                 stdout.read(&mut first_chunk),
             ).await {
                 Ok(Ok(n)) if n > 0 => n,

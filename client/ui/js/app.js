@@ -363,7 +363,20 @@ class HyprRemoteUnifiedApp {
 
     const flushQueue = () => {
       if (queue.length > 0 && !sourceBuffer.updating && mediaSource.readyState === 'open') {
-        const chunk = queue.shift();
+        let chunk;
+        if (queue.length === 1) {
+          chunk = queue.shift();
+        } else {
+          // Combine all pending chunks into one buffer to prevent lag buildup!
+          const totalLen = queue.reduce((acc, q) => acc + q.byteLength, 0);
+          chunk = new Uint8Array(totalLen);
+          let offset = 0;
+          while (queue.length > 0) {
+            const part = queue.shift();
+            chunk.set(part, offset);
+            offset += part.byteLength;
+          }
+        }
         try {
           sourceBuffer.appendBuffer(chunk);
         } catch (e) {
@@ -373,39 +386,34 @@ class HyprRemoteUnifiedApp {
     };
 
     sourceBuffer.addEventListener('updateend', () => {
-      // Smooth live-edge catch-up without seek stalls (prevents FPS drops)
+      // Direct live-edge tracking: keep within 30ms of real-time stream
       if (video.buffered.length > 0) {
         const end = video.buffered.end(video.buffered.length - 1);
         const delay = end - video.currentTime;
-        if (delay > 1.2) {
-          // If severely behind (>1.2s lag spike), jump to live edge with safe 150ms buffer cushion
-          video.currentTime = Math.max(0, end - 0.15);
-        } else if (delay > 0.35) {
-          video.playbackRate = 1.15;
-        } else if (delay > 0.10) {
-          video.playbackRate = 1.05;
-        } else if (delay <= 0.03) {
-          video.playbackRate = 1.0;
+        if (delay > 0.3) {
+          video.currentTime = Math.max(0, end - 0.03);
         }
       }
 
-      // Memory management: prune old buffered video segments > 4s in the past
-      if (!sourceBuffer.updating && video.currentTime > 8) {
+      // Memory management: prune old buffered video segments > 3s in the past
+      if (!sourceBuffer.updating && video.currentTime > 6) {
         try {
-          sourceBuffer.remove(0, video.currentTime - 4);
+          sourceBuffer.remove(0, video.currentTime - 3);
         } catch (_) {}
       }
 
       flushQueue();
     });
 
-    video.onloadedmetadata = () => {
+    const handleVideoDimensions = () => {
       if (video.videoWidth > 0 && video.videoHeight > 0) {
         this.remoteWidth = video.videoWidth;
         this.remoteHeight = video.videoHeight;
         this._updateCanvasLayout();
       }
     };
+    video.onloadedmetadata = handleVideoDimensions;
+    video.onresize = handleVideoDimensions;
 
     let hasPlayed = false;
     let hwFrameCount = 0;
@@ -427,14 +435,14 @@ class HyprRemoteUnifiedApp {
 
     const h264Watchdog = setTimeout(() => {
       if (!hasPlayed && this.sessionRunning && !this.isH264Active) {
-        console.warn('H.264 stream watchdog timeout (2.5s), auto-falling back to Canvas stream loop');
+        console.warn('H.264 stream watchdog timeout (4.5s), auto-falling back to Canvas stream loop');
         if (this.h264AbortController) {
           this.h264AbortController.abort();
           this.h264AbortController = null;
         }
         this._startStreamLoop();
       }
-    }, 2500);
+    }, 4500);
 
     video.onplaying = () => {
       hasPlayed = true;
@@ -821,16 +829,38 @@ class HyprRemoteUnifiedApp {
     const rect = el.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return null;
 
-    const cx = e.clientX - rect.left;
-    const cy = e.clientY - rect.top;
+    const nw = el.videoWidth || this.remoteWidth || el.naturalWidth || el.width || 1920;
+    const nh = el.videoHeight || this.remoteHeight || el.naturalHeight || el.height || 1080;
 
-    if (!e.buttons && (cx < 0 || cx > rect.width || cy < 0 || cy > rect.height)) {
+    let contentW = rect.width;
+    let contentH = rect.height;
+    let offsetX = 0;
+    let offsetY = 0;
+
+    if (this.scaleMode !== 'stretch' && nw > 0 && nh > 0) {
+      const elRatio = rect.width / rect.height;
+      const mediaRatio = nw / nh;
+      if (elRatio > mediaRatio) {
+        // Pillarbox: horizontal black bars on left and right
+        contentW = rect.height * mediaRatio;
+        offsetX = (rect.width - contentW) / 2;
+      } else if (elRatio < mediaRatio) {
+        // Letterbox: vertical black bars on top and bottom
+        contentH = rect.width / mediaRatio;
+        offsetY = (rect.height - contentH) / 2;
+      }
+    }
+
+    const cx = e.clientX - rect.left - offsetX;
+    const cy = e.clientY - rect.top - offsetY;
+
+    if (!e.buttons && (cx < 0 || cx > contentW || cy < 0 || cy > contentH)) {
       return null;
     }
 
     return {
-      x: Math.max(0, Math.min(1, cx / rect.width)),
-      y: Math.max(0, Math.min(1, cy / rect.height)),
+      x: Math.max(0, Math.min(1, cx / contentW)),
+      y: Math.max(0, Math.min(1, cy / contentH)),
     };
   }
 

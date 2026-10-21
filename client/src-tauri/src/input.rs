@@ -22,6 +22,12 @@ pub fn handle_control_message(msg: ControlMessage) {
     }
 }
 
+#[cfg(target_os = "linux")]
+pub use linux_impl::reset_monitor_cache;
+
+#[cfg(not(target_os = "linux"))]
+pub fn reset_monitor_cache() {}
+
 // ==========================================
 // macOS Input Implementation (Direct Warp + Session Tap)
 // ==========================================
@@ -272,7 +278,10 @@ mod linux_impl {
                 libc::ioctl(fd, UI_SET_KEYBIT as _, BTN_MIDDLE as libc::c_int);
                 libc::ioctl(fd, UI_SET_KEYBIT as _, BTN_SIDE as libc::c_int);
                 libc::ioctl(fd, UI_SET_KEYBIT as _, BTN_EXTRA as libc::c_int);
-                libc::ioctl(fd, UI_SET_KEYBIT as _, BTN_TOUCH as libc::c_int);
+
+                const UI_SET_PROPBIT: libc::c_ulong = 1074025838;
+                const INPUT_PROP_POINTER: libc::c_int = 0;
+                libc::ioctl(fd, UI_SET_PROPBIT as _, INPUT_PROP_POINTER);
 
                 for code in 1..256 {
                     libc::ioctl(fd, UI_SET_KEYBIT as _, code as libc::c_int);
@@ -448,31 +457,93 @@ mod linux_impl {
         }
     }
 
-    pub fn dispatch_mouse_move(x: f32, y: f32, dx: i32, dy: i32, is_rel: bool) {
-        // Priority 1: Native Linux /dev/uinput absolute or relative pointer (< 0.05ms)
-        {
-            let uinput_guard = get_uinput();
-            if let Some(ref dev) = *uinput_guard {
-                if is_rel {
-                    dev.write_event(EV_REL, REL_X, dx);
-                    dev.write_event(EV_REL, REL_Y, dy);
-                    dev.syn();
-                } else {
-                    let abs_x = (x.clamp(0.0, 1.0) * 65535.0).round() as i32;
-                    let abs_y = (y.clamp(0.0, 1.0) * 65535.0).round() as i32;
-                    dev.write_event(EV_ABS, ABS_X, abs_x);
-                    dev.write_event(EV_ABS, ABS_Y, abs_y);
-                    dev.syn();
-                    if MOVE_LOG_COUNTER.fetch_add(1, Ordering::Relaxed) % 60 == 0 {
-                        println!("[Input] UInput ABS: ({}, {}) norm=({:.4}, {:.4})", abs_x, abs_y, x, y);
+    pub fn reset_monitor_cache() {
+        LAST_MONITOR_CHECK.store(0, Ordering::Relaxed);
+    }
+
+    fn hyprland_move_cursor(px: i32, py: i32) -> bool {
+        // 1. Fast path: Direct Hyprland UNIX IPC socket (< 0.02ms)
+        let mut candidates = Vec::new();
+        if let Ok(sig) = std::env::var("HYPRLAND_INSTANCE_SIGNATURE") {
+            if let Ok(runtime) = std::env::var("XDG_RUNTIME_DIR") {
+                candidates.push(format!("{}/hypr/{}/.socket.sock", runtime, sig));
+            }
+            candidates.push(format!("/tmp/hypr/{}/.socket.sock", sig));
+        }
+        if let Ok(runtime) = std::env::var("XDG_RUNTIME_DIR") {
+            if let Ok(entries) = std::fs::read_dir(format!("{}/hypr", runtime)) {
+                for entry in entries.flatten() {
+                    let s = entry.path().join(".socket.sock");
+                    if s.exists() {
+                        candidates.push(s.to_string_lossy().to_string());
                     }
                 }
-                return;
+            }
+        }
+        if let Ok(entries) = std::fs::read_dir("/tmp/hypr") {
+            for entry in entries.flatten() {
+                let s = entry.path().join(".socket.sock");
+                if s.exists() {
+                    candidates.push(s.to_string_lossy().to_string());
+                }
             }
         }
 
-        // Priority 2: Coalesced fallback worker via ydotool / hyprctl
-        submit_coalesced_mouse_move(x, y, dx, dy, is_rel);
+        for sock_path in candidates {
+            if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&sock_path) {
+                use std::io::Write;
+                let cmd = format!("dispatch movecursor {},{}\n", px, py);
+                if stream.write_all(cmd.as_bytes()).is_ok() {
+                    return true;
+                }
+            }
+        }
+
+        // 2. Fallback: Command hyprctl dispatch movecursor
+        if let Ok(status) = std::process::Command::new("hyprctl")
+            .args(["dispatch", "movecursor", &format!("{},{}", px, py)])
+            .status()
+        {
+            return status.success();
+        }
+
+        false
+    }
+
+    pub fn dispatch_mouse_move(x: f32, y: f32, dx: i32, dy: i32, is_rel: bool) {
+        if is_rel {
+            let uinput_guard = get_uinput();
+            if let Some(ref dev) = *uinput_guard {
+                dev.write_event(EV_REL, REL_X, dx);
+                dev.write_event(EV_REL, REL_Y, dy);
+                dev.syn();
+                return;
+            }
+            let _ = prepare_ydotool_cmd("mousemove")
+                .args(["--", &dx.to_string(), &dy.to_string()])
+                .status();
+            return;
+        }
+
+        // Absolute move: Calculate exact pixel position on active monitor
+        let (screen_w, screen_h, ox, oy) = get_active_monitor_bounds();
+        let px = ox + (x.clamp(0.0, 1.0) * screen_w).round() as i32;
+        let py = oy + (y.clamp(0.0, 1.0) * screen_h).round() as i32;
+
+        // 1. Move visible compositor cursor directly (1:1 pixel overlap!)
+        hyprland_move_cursor(px, py);
+
+        // 2. Synchronize uinput device for raw evdev applications
+        {
+            let uinput_guard = get_uinput();
+            if let Some(ref dev) = *uinput_guard {
+                let abs_x = (x.clamp(0.0, 1.0) * 65535.0).round() as i32;
+                let abs_y = (y.clamp(0.0, 1.0) * 65535.0).round() as i32;
+                dev.write_event(EV_ABS, ABS_X, abs_x);
+                dev.write_event(EV_ABS, ABS_Y, abs_y);
+                dev.syn();
+            }
+        }
     }
 
     static PENDING_MOVE: Mutex<Option<(f32, f32, i32, i32, bool)>> = Mutex::new(None);
