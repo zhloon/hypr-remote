@@ -53,12 +53,18 @@ async fn resolve_connection_code(
         });
     }
 
-    // 3. Fallback: direct IP:Port
-    if code.contains('.') && code.contains(':') {
+    // 3. Direct IP (e.g. "192.168.1.100" or "192.168.1.100:18080")
+    let trimmed = code.trim();
+    if trimmed.contains('.') {
+        let target = if trimmed.contains(':') {
+            trimmed.to_string()
+        } else {
+            format!("{}:18080", trimmed)
+        };
         return Ok(ConnectResult {
             success: true,
             error: None,
-            stream_url: Some(format!("http://{}/stream", code.trim())),
+            stream_url: Some(format!("http://{}/stream", target)),
         });
     }
 

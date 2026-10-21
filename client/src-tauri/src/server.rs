@@ -68,20 +68,21 @@ impl EmbeddedHostServer {
         if method == "GET" && path.starts_with("/stream") {
             let response_headers = "HTTP/1.1 200 OK\r\n\
                 Connection: close\r\n\
-                Cache-Control: no-cache, private\r\n\
+                Cache-Control: no-cache, no-store, must-revalidate\r\n\
                 Pragma: no-cache\r\n\
-                Content-Type: multipart/x-mixed-replace; boundary=--frame\r\n\
+                Expires: 0\r\n\
+                Content-Type: multipart/x-mixed-replace; boundary=hyprframe\r\n\
                 Access-Control-Allow-Origin: *\r\n\r\n";
 
             if stream.write_all(response_headers.as_bytes()).await.is_err() {
                 return;
             }
 
-            // Stream frames at ~30 FPS
+            // Stream frames at ~40 FPS
             loop {
                 let (frame_bytes, mime_type) = capture_desktop_frame();
                 let part_header = format!(
-                    "--frame\r\n\
+                    "--hyprframe\r\n\
                     Content-Type: {}\r\n\
                     Content-Length: {}\r\n\r\n",
                     mime_type,
@@ -98,7 +99,7 @@ impl EmbeddedHostServer {
                     break;
                 }
 
-                tokio::time::sleep(Duration::from_millis(33)).await;
+                tokio::time::sleep(Duration::from_millis(25)).await;
             }
         }
         // 2. Input Control Event: POST /input

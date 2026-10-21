@@ -19,9 +19,20 @@ elif command -v apt-get &>/dev/null; then
 fi
 
 # 2. 自动配置 input 组与虚拟键鼠服务
-echo "[2/3] 自动配置 Hyprland 键鼠控制权限..."
+echo "[2/3] 自动配置 Hyprland 键鼠控制权限与防火墙..."
 sudo usermod -aG input "$USER" 2>/dev/null || true
 sudo systemctl enable --now ydotool 2>/dev/null || systemctl --user enable --now ydotoold 2>/dev/null || true
+
+# 自动放行局域网控制端口 (TCP 18080 + UDP 8082)
+if command -v ufw &>/dev/null; then
+    sudo ufw allow 18080/tcp 2>/dev/null || true
+    sudo ufw allow 8082/udp 2>/dev/null || true
+fi
+if command -v firewall-cmd &>/dev/null; then
+    sudo firewall-cmd --add-port=18080/tcp --permanent 2>/dev/null || true
+    sudo firewall-cmd --add-port=8082/udp --permanent 2>/dev/null || true
+    sudo firewall-cmd --reload 2>/dev/null || true
+fi
 
 # 3. 检查并加载 Rust 环境
 if [ -f "$HOME/.cargo/env" ]; then
