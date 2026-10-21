@@ -43,6 +43,7 @@ class HyprRemoteUnifiedApp {
       btnSyncClipboard: document.getElementById('btn-sync-clipboard'),
       btnToggleFs: document.getElementById('btn-toggle-fs'),
       btnDisconnect: document.getElementById('btn-disconnect'),
+      btnCollapseNav: document.getElementById('btn-collapse-nav'),
       navTriggerHandle: document.getElementById('nav-trigger-handle'),
     };
 
@@ -162,32 +163,72 @@ class HyprRemoteUnifiedApp {
     });
 
     // Auto-hiding session nav bar controls
-    this._showNav = (autoHideDelay = 2500) => {
+    let isMouseInsideNav = false;
+    this._showNav = (autoHideDelay = 0) => {
       if (!this.dom.sessionNav) return;
+      if (this.navHideTimer) {
+        clearTimeout(this.navHideTimer);
+        this.navHideTimer = null;
+      }
       this.dom.sessionNav.classList.add('visible');
-      if (this.navHideTimer) clearTimeout(this.navHideTimer);
+      if (this.dom.navTriggerHandle) {
+        this.dom.navTriggerHandle.style.opacity = '0';
+        this.dom.navTriggerHandle.style.pointerEvents = 'none';
+      }
       if (autoHideDelay > 0) {
         this.navHideTimer = setTimeout(() => {
-          if (!this.dom.sessionNav?.matches(':hover')) {
-            this.dom.sessionNav?.classList.remove('visible');
+          if (!isMouseInsideNav) {
+            this._hideNav();
           }
         }, autoHideDelay);
       }
     };
 
+    this._hideNav = () => {
+      if (!this.dom.sessionNav) return;
+      if (this.navHideTimer) {
+        clearTimeout(this.navHideTimer);
+        this.navHideTimer = null;
+      }
+      this.dom.sessionNav.classList.remove('visible');
+      if (this.dom.navTriggerHandle) {
+        this.dom.navTriggerHandle.style.opacity = '1';
+        this.dom.navTriggerHandle.style.pointerEvents = 'auto';
+      }
+    };
+
     if (this.dom.sessionNav) {
-      this.dom.sessionNav.addEventListener('mouseenter', () => this._showNav(0));
-      this.dom.sessionNav.addEventListener('mouseleave', () => this._showNav(1500));
+      this.dom.sessionNav.addEventListener('mouseenter', () => {
+        isMouseInsideNav = true;
+        this._showNav(0);
+      });
+      this.dom.sessionNav.addEventListener('mouseleave', () => {
+        isMouseInsideNav = false;
+        this._showNav(1800);
+      });
     }
     if (this.dom.navTriggerHandle) {
-      this.dom.navTriggerHandle.addEventListener('mouseenter', () => this._showNav(3000));
-      this.dom.navTriggerHandle.addEventListener('click', () => this._showNav(3500));
+      this.dom.navTriggerHandle.addEventListener('mouseenter', () => {
+        this._showNav(0);
+      });
+      this.dom.navTriggerHandle.addEventListener('click', () => {
+        this._showNav(0);
+      });
+    }
+    if (this.dom.btnCollapseNav) {
+      this.dom.btnCollapseNav.addEventListener('click', (e) => {
+        e.stopPropagation();
+        isMouseInsideNav = false;
+        this._hideNav();
+      });
     }
 
-    // When mouse moves near top of window (e.clientY <= 35), reveal nav bar
+    // Top-center trigger area (only within central handle area, never full screen width)
     window.addEventListener('mousemove', (e) => {
-      if (this.activeSession && e.clientY <= 35) {
-        this._showNav(2500);
+      if (!this.activeSession) return;
+      const inCenter = Math.abs(e.clientX - window.innerWidth / 2) < 90;
+      if (e.clientY <= 14 && inCenter) {
+        this._showNav(0);
       }
     });
 
@@ -417,20 +458,17 @@ class HyprRemoteUnifiedApp {
       }
     };
 
+    let lastPruneTime = performance.now();
     sourceBuffer.addEventListener('updateend', () => {
-      // Direct live-edge tracking: keep within 20ms of real-time stream
-      if (video.buffered.length > 0) {
-        const liveEnd = video.buffered.end(video.buffered.length - 1);
-        const delay = liveEnd - video.currentTime;
-        if (delay > 0.35) {
-          video.currentTime = Math.max(0, liveEnd - 0.015);
-        }
-      }
-
-      // Memory management: prune old buffered video segments > 3s in the past
-      if (!sourceBuffer.updating && video.currentTime > 5) {
+      // Memory management: Prune old buffered video segments periodically (every 15s), NOT on every chunk!
+      const now = performance.now();
+      if (now - lastPruneTime > 15000 && !sourceBuffer.updating && video.currentTime > 15) {
+        lastPruneTime = now;
         try {
-          sourceBuffer.remove(0, video.currentTime - 2.5);
+          const bStart = sourceBuffer.buffered.start(0);
+          if (video.currentTime - bStart > 12) {
+            sourceBuffer.remove(0, video.currentTime - 8);
+          }
         } catch (_) {}
       }
 
@@ -446,6 +484,11 @@ class HyprRemoteUnifiedApp {
     };
     video.onloadedmetadata = handleVideoDimensions;
     video.onresize = handleVideoDimensions;
+    video.oncanplay = () => {
+      if (video.paused && this.sessionRunning && this.isH264Active) {
+        video.play().catch(() => {});
+      }
+    };
 
     let hasPlayed = false;
     let hwFrameCount = 0;
@@ -453,19 +496,26 @@ class HyprRemoteUnifiedApp {
     const trackHwFrame = () => {
       if (!this.sessionRunning || !this.isH264Active) return;
 
-      // Ultra-low latency dynamic drift compensation:
-      // Continuously adjust playbackRate so buffer delay stays between 10ms - 25ms!
       if (video.buffered.length > 0) {
         const liveEnd = video.buffered.end(video.buffered.length - 1);
         const delay = liveEnd - video.currentTime;
-        if (delay > 0.04) {
-          video.playbackRate = delay > 0.12 ? 1.25 : 1.08;
-        } else if (delay < 0.02) {
+
+        // Smooth rate adaptation without buffer starvation:
+        // When delay is under 150ms, play at 1.0x (100% natural smooth playback, zero judder)
+        // If delay drifts above 220ms, gently catch up at 1.06x (or 1.12x if delay > 0.5s)
+        // Once delay returns to <= 90ms, return to 1.0x
+        if (delay > 0.22) {
+          video.playbackRate = delay > 0.5 ? 1.12 : 1.06;
+        } else if (delay <= 0.09) {
           video.playbackRate = 1.0;
         }
-        if (delay > 0.35) {
-          video.currentTime = Math.max(0, liveEnd - 0.015);
+
+        // Only hard-seek on severe lag (> 1.2s, e.g. after window minimize or network hang)
+        // And seek to liveEnd - 0.06 (60ms buffer cushion), NEVER 15ms!
+        if (delay > 1.2) {
+          video.currentTime = Math.max(0, liveEnd - 0.06);
         }
+
         if (this.dom.statLatency) {
           const latMs = Math.round(delay * 1000);
           this.dom.statLatency.textContent = `${Math.max(5, latMs)}ms`;
@@ -505,7 +555,7 @@ class HyprRemoteUnifiedApp {
       clearTimeout(h264Watchdog);
       if (video.buffered.length > 0) {
         const liveEnd = video.buffered.end(video.buffered.length - 1);
-        video.currentTime = Math.max(0, liveEnd - 0.01);
+        video.currentTime = Math.max(0, liveEnd - 0.05);
       }
       video.style.display = 'block';
       if (canvas) canvas.style.display = 'none';
@@ -513,7 +563,7 @@ class HyprRemoteUnifiedApp {
       this.isH264Active = true;
       this.currentQualityIdx = 0;
       if (this.dom.statFps) this.dom.statFps.textContent = '120 FPS (HW)';
-      if (this.dom.statLatency) this.dom.statLatency.textContent = '< 15ms';
+      if (this.dom.statLatency) this.dom.statLatency.textContent = '< 20ms';
       if (this.dom.btnToggleQuality) this.dom.btnToggleQuality.textContent = this.qualityModes[0].label;
       this._updateCanvasLayout();
 

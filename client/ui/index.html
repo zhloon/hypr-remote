@@ -110,7 +110,9 @@
   <!-- Remote Desktop View (Active Session) -->
   <div id="session-view" class="session-container" style="display: none;">
     <!-- Top Hover Trigger Area / Discreet Handle -->
-    <div id="nav-trigger-handle" class="nav-trigger-handle" title="鼠标移至屏幕顶端显示控制栏"></div>
+    <div id="nav-trigger-handle" class="nav-trigger-handle" title="鼠标移至顶端或点击展开控制栏">
+      <span>▼ 控制栏</span>
+    </div>
 
     <!-- Floating Header Bar (Auto-collapsing sleek pill) -->
     <nav class="session-nav" id="session-nav">
@@ -122,7 +124,7 @@
       <div class="session-stats">
         <span id="stat-fps">120 FPS</span>
         <span class="stat-div">|</span>
-        <span id="stat-latency">&lt; 10ms</span>
+        <span id="stat-latency">&lt; 15ms</span>
       </div>
 
       <div class="session-actions">
@@ -130,6 +132,7 @@
         <button id="btn-sync-clipboard" class="tool-btn active" title="双向共享剪贴板已启用 (点击手动同步)">📋 剪贴板同步</button>
         <button id="btn-toggle-fs" class="tool-btn">全屏 (F11)</button>
         <button id="btn-disconnect" class="tool-btn btn-danger">断开</button>
+        <button id="btn-collapse-nav" class="tool-btn btn-collapse" title="收起控制栏 (鼠标移至顶部手柄可重新展开)">▲ 收起</button>
       </div>
     </nav>
 

@@ -215,8 +215,8 @@ pub fn spawn_h264_recorder_process() -> Result<tokio::process::Child, std::io::E
         println!("[H264/CPU] No dedicated hardware encoder node -> Using libx264 ultrafast (120fps, capped 2 threads)");
     }
 
-    // If CPU fallback is needed, cap threads=2 to prevent 300%+ CPU throttling / thermal runaway!
-    let cpu_fallback = "-c libx264 -b 0 -p preset=ultrafast -p tune=zerolatency -p g=30 -p threads=2";
+    // If CPU fallback is needed, cap threads=4 to prevent stutter while avoiding thermal runaway
+    let cpu_fallback = "-c libx264 -b 0 -p preset=ultrafast -p tune=zerolatency -p g=30 -p threads=4";
     let cpu_wf = format!("wf-recorder -D -y {} -m mpegts -r 120 {} -f /dev/stdout", out_flag, cpu_fallback);
     let vaapi_wf = format!("wf-recorder -D -y {} -m mpegts -r 120 -c h264_vaapi -d {} -b 0 -p g=30 -f /dev/stdout", out_flag, vaapi_dev);
 
@@ -236,7 +236,7 @@ pub fn spawn_h264_recorder_process() -> Result<tokio::process::Child, std::io::E
     };
 
     let pipeline = format!(
-        "{} | ffmpeg -hide_banner -loglevel warning -fflags nobuffer -flags low_delay -probesize 65536 -analyzeduration 100000 -f mpegts -i - -c:v copy -flush_packets 1 -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof -frag_duration 8333 -",
+        "{} | ffmpeg -hide_banner -loglevel warning -fflags nobuffer+discardcorrupt -flags low_delay -probesize 65536 -analyzeduration 100000 -f mpegts -i - -c:v copy -flush_packets 1 -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof -frag_duration 33333 -",
         wf_cmd
     );
 

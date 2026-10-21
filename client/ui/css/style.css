@@ -361,19 +361,36 @@ body {
   top: 0;
   left: 50%;
   transform: translateX(-50%);
-  width: 90px;
-  height: 5px;
-  background: rgba(255, 255, 255, 0.22);
-  border-radius: 0 0 6px 6px;
+  width: 120px;
+  height: 20px;
+  background: rgba(18, 22, 34, 0.85);
+  border: 1px solid var(--border);
+  border-top: none;
+  border-radius: 0 0 10px 10px;
   z-index: 999;
   cursor: pointer;
-  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  user-select: none;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+.nav-trigger-handle span {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  letter-spacing: 0.5px;
+  transition: color 0.2s;
 }
 .nav-trigger-handle:hover {
   background: var(--primary);
-  width: 120px;
-  height: 8px;
-  box-shadow: 0 0 12px rgba(41, 121, 255, 0.6);
+  border-color: var(--primary);
+  box-shadow: 0 4px 16px rgba(41, 121, 255, 0.5);
+  height: 24px;
+}
+.nav-trigger-handle:hover span {
+  color: #ffffff;
 }
 
 .session-nav {
@@ -382,27 +399,37 @@ body {
   left: 50%;
   transform: translate(-50%, -100%);
   z-index: 1000;
-  background: rgba(15, 18, 28, 0.94);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
+  background: rgba(15, 18, 28, 0.96);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
   border: 1px solid var(--border);
   border-top: none;
-  border-radius: 0 0 20px 20px;
-  padding: 8px 22px;
+  border-radius: 0 0 18px 18px;
+  padding: 8px 20px;
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 14px;
   box-shadow: 0 12px 36px rgba(0,0,0,0.7);
   opacity: 0;
   pointer-events: none;
-  transition: transform 0.26s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.2s ease;
+  transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.2s ease;
 }
 
-.session-nav.visible,
-.session-nav:hover {
+.session-nav.visible {
   transform: translate(-50%, 0);
   opacity: 1;
   pointer-events: auto;
+}
+
+.btn-collapse {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.15);
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.btn-collapse:hover {
+  background: rgba(255, 255, 255, 0.18);
+  color: var(--text-main);
 }
 
 .session-info {
