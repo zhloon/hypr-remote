@@ -152,6 +152,10 @@ class HyprRemoteUnifiedApp {
     });
 
     renderTarget.addEventListener('contextmenu', (e) => e.preventDefault());
+
+    window.addEventListener('resize', () => {
+      this._updateCanvasLayout();
+    });
   }
 
   _startLanPolling() {
@@ -233,6 +237,8 @@ class HyprRemoteUnifiedApp {
       this.dom.sessionView.style.display = 'flex';
       this.dom.sessionTitle.textContent = `${code} (${this.activeSession.ip})`;
 
+      this._updateCanvasLayout();
+
       // Start High-FPS Hardware GPU Canvas Stream Loop
       this._startStreamLoop();
 
@@ -278,6 +284,7 @@ class HyprRemoteUnifiedApp {
             canvas.height = bitmap.height;
             this.remoteWidth = bitmap.width;
             this.remoteHeight = bitmap.height;
+            this._updateCanvasLayout();
           }
 
           ctx.drawImage(bitmap, 0, 0);
@@ -333,6 +340,7 @@ class HyprRemoteUnifiedApp {
         const isFs = await window.__TAURI__.core.invoke('toggle_fullscreen', { fullscreen: null });
         this.isFullscreen = isFs;
         this._updateFsUi();
+        setTimeout(() => this._updateCanvasLayout(), 50);
       } catch (e) {
         console.error('Fullscreen toggle error:', e);
       }
@@ -345,6 +353,7 @@ class HyprRemoteUnifiedApp {
         this.isFullscreen = false;
       }
       this._updateFsUi();
+      setTimeout(() => this._updateCanvasLayout(), 50);
     }
   }
 
@@ -361,6 +370,7 @@ class HyprRemoteUnifiedApp {
       this.dom.btnToggleScale.textContent = this.isStretched ? '原始比例' : '铺满全屏';
       this.dom.btnToggleScale.classList.toggle('active', this.isStretched);
     }
+    this._updateCanvasLayout();
   }
 
   togglePointerLock() {
@@ -370,6 +380,40 @@ class HyprRemoteUnifiedApp {
     } else {
       el.requestPointerLock?.();
     }
+  }
+
+  _updateCanvasLayout() {
+    const canvas = this.dom.remoteCanvas;
+    const img = this.dom.remoteImg;
+    const el = canvas && canvas.style.display !== 'none' ? canvas : img;
+    if (!el) return;
+
+    if (this.isStretched) {
+      el.style.width = '100vw';
+      el.style.height = '100vh';
+      return;
+    }
+
+    const viewport = document.querySelector('.screen-viewport');
+    const vw = viewport ? viewport.clientWidth : window.innerWidth;
+    const vh = viewport ? viewport.clientHeight : window.innerHeight;
+    const nw = this.remoteWidth || canvas?.width || 1920;
+    const nh = this.remoteHeight || canvas?.height || 1080;
+
+    const vRatio = vw / vh;
+    const rRatio = nw / nh;
+
+    let dw, dh;
+    if (vRatio > rRatio) {
+      dh = vh;
+      dw = Math.round(vh * rRatio);
+    } else {
+      dw = vw;
+      dh = Math.round(vw / rRatio);
+    }
+
+    el.style.width = `${dw}px`;
+    el.style.height = `${dh}px`;
   }
 
   // ==========================================
@@ -422,18 +466,19 @@ class HyprRemoteUnifiedApp {
   _getNormalizedCoords(e) {
     const el = this.dom.remoteCanvas.style.display !== 'none' ? this.dom.remoteCanvas : this.dom.remoteImg;
     const rect = el.getBoundingClientRect();
-    const nw = this.remoteWidth || el.naturalWidth || el.width || 1920;
-    const nh = this.remoteHeight || el.naturalHeight || el.height || 1080;
+    if (rect.width <= 0 || rect.height <= 0) return null;
 
     if (this.isStretched) {
       const cx = e.clientX - rect.left;
       const cy = e.clientY - rect.top;
       return {
-        x: parseFloat(Math.max(0, Math.min(1, cx / rect.width)).toFixed(4)),
-        y: parseFloat(Math.max(0, Math.min(1, cy / rect.height)).toFixed(4)),
+        x: Math.max(0, Math.min(1, cx / rect.width)),
+        y: Math.max(0, Math.min(1, cy / rect.height)),
       };
     }
 
+    const nw = this.remoteWidth || el.naturalWidth || el.width || 1920;
+    const nh = this.remoteHeight || el.naturalHeight || el.height || 1080;
     const rectRatio = rect.width / rect.height;
     const imgRatio = nw / nh;
 
@@ -442,24 +487,27 @@ class HyprRemoteUnifiedApp {
     let ox = 0;
     let oy = 0;
 
-    if (rectRatio > imgRatio) {
-      rw = rect.height * imgRatio;
-      ox = (rect.width - rw) / 2;
-    } else {
-      rh = rect.width / imgRatio;
-      oy = (rect.height - rh) / 2;
+    // Compensate if element aspect ratio differs from image aspect ratio by > 1%
+    if (Math.abs(rectRatio - imgRatio) > 0.01) {
+      if (rectRatio > imgRatio) {
+        rw = rect.height * imgRatio;
+        ox = (rect.width - rw) / 2;
+      } else {
+        rh = rect.width / imgRatio;
+        oy = (rect.height - rh) / 2;
+      }
     }
 
     const cx = e.clientX - rect.left - ox;
     const cy = e.clientY - rect.top - oy;
 
-    if (cx < 0 || cx > rw || cy < 0 || cy > rh) {
+    if (!e.buttons && (cx < 0 || cx > rw || cy < 0 || cy > rh)) {
       return null;
     }
 
     return {
-      x: parseFloat(Math.max(0, Math.min(1, cx / rw)).toFixed(4)),
-      y: parseFloat(Math.max(0, Math.min(1, cy / rh)).toFixed(4)),
+      x: Math.max(0, Math.min(1, cx / rw)),
+      y: Math.max(0, Math.min(1, cy / rh)),
     };
   }
 
@@ -515,6 +563,19 @@ class HyprRemoteUnifiedApp {
   }
 
   onMouseUp(e) {
+    if (!this.isPointerLocked) {
+      const coords = this._getNormalizedCoords(e);
+      if (coords) {
+        this._sendInput({
+          type: 'MouseMove',
+          x: coords.x,
+          y: coords.y,
+          dx: 0,
+          dy: 0,
+          is_rel: false,
+        });
+      }
+    }
     this._sendInput({
       type: 'MouseButton',
       btn: e.button,

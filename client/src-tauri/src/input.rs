@@ -170,7 +170,7 @@ fn dispatch_key(code: u16, down: bool) {
 #[cfg(target_os = "linux")]
 mod linux_impl {
     use crate::capture::{CURRENT_SCREEN_HEIGHT, CURRENT_SCREEN_WIDTH};
-    use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
     use std::sync::Once;
 
     static MOUSE_TARGET_X: AtomicI32 = AtomicI32::new(-1);
@@ -178,6 +178,12 @@ mod linux_impl {
     static MOUSE_DIRTY: AtomicBool = AtomicBool::new(false);
     static WORKER_INIT: Once = Once::new();
     static MOVE_LOG_COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    static LAST_MONITOR_CHECK: AtomicU64 = AtomicU64::new(0);
+    static CACHED_LOGICAL_W: AtomicU32 = AtomicU32::new(0);
+    static CACHED_LOGICAL_H: AtomicU32 = AtomicU32::new(0);
+    static CACHED_OFFSET_X: AtomicI32 = AtomicI32::new(0);
+    static CACHED_OFFSET_Y: AtomicI32 = AtomicI32::new(0);
 
     pub fn prepare_ydotool_cmd(subcmd: &str) -> std::process::Command {
         let mut cmd = std::process::Command::new("ydotool");
@@ -194,6 +200,121 @@ mod linux_impl {
         cmd
     }
 
+    fn send_hyprland_cmd(cmd: &str) -> bool {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixStream;
+
+        let sig = std::env::var("HYPRLAND_INSTANCE_SIGNATURE").unwrap_or_default();
+        if sig.is_empty() {
+            return false;
+        }
+        let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/run/user/1000".to_string());
+        let socket_path = format!("{}/hypr/{}/.socket.sock", runtime_dir, sig);
+
+        if let Ok(mut stream) = UnixStream::connect(&socket_path) {
+            let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(40)));
+            let _ = stream.set_write_timeout(Some(std::time::Duration::from_millis(40)));
+            let msg = format!("{}\n", cmd);
+            if stream.write_all(msg.as_bytes()).is_ok() {
+                let mut res = [0u8; 32];
+                if let Ok(n) = stream.read(&mut res) {
+                    let s = String::from_utf8_lossy(&res[..n]);
+                    if s.trim() == "ok" || s.starts_with("ok") {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn get_active_monitor_bounds() -> (f32, f32, i32, i32) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let last = LAST_MONITOR_CHECK.load(Ordering::Relaxed);
+        if now.saturating_sub(last) >= 3 {
+            LAST_MONITOR_CHECK.store(now, Ordering::Relaxed);
+            if let Ok(output) = std::process::Command::new("hyprctl")
+                .args(["monitors", "-j"])
+                .output()
+            {
+                if output.status.success() {
+                    if let Ok(monitors) = serde_json::from_slice::<Vec<serde_json::Value>>(&output.stdout) {
+                        let mon = monitors.iter().find(|m| m["focused"].as_bool().unwrap_or(false))
+                            .or_else(|| monitors.first());
+
+                        if let Some(m) = mon {
+                            let w = m["width"].as_f64().unwrap_or(1920.0) as f32;
+                            let h = m["height"].as_f64().unwrap_or(1080.0) as f32;
+                            let s = m["scale"].as_f64().unwrap_or(1.0) as f32;
+                            let scale = if s > 0.1 { s } else { 1.0 };
+                            let x = m["x"].as_i64().unwrap_or(0) as i32;
+                            let y = m["y"].as_i64().unwrap_or(0) as i32;
+                            let logical_w = (w / scale).round() as u32;
+                            let logical_h = (h / scale).round() as u32;
+
+                            CACHED_LOGICAL_W.store(logical_w, Ordering::Relaxed);
+                            CACHED_LOGICAL_H.store(logical_h, Ordering::Relaxed);
+                            CACHED_OFFSET_X.store(x, Ordering::Relaxed);
+                            CACHED_OFFSET_Y.store(y, Ordering::Relaxed);
+                        }
+                    }
+                }
+            }
+        }
+
+        let w = CACHED_LOGICAL_W.load(Ordering::Relaxed) as f32;
+        let h = CACHED_LOGICAL_H.load(Ordering::Relaxed) as f32;
+        let ox = CACHED_OFFSET_X.load(Ordering::Relaxed);
+        let oy = CACHED_OFFSET_Y.load(Ordering::Relaxed);
+
+        if w > 0.0 && h > 0.0 {
+            (w, h, ox, oy)
+        } else {
+            (
+                CURRENT_SCREEN_WIDTH.load(Ordering::Relaxed) as f32,
+                CURRENT_SCREEN_HEIGHT.load(Ordering::Relaxed) as f32,
+                0,
+                0,
+            )
+        }
+    }
+
+    fn warp_cursor_position(px: i32, py: i32) {
+        // 1. Direct Hyprland UNIX socket (fastest, sub-millisecond, exact logical coordinates)
+        if send_hyprland_cmd(&format!("dispatch movecursor {} {}", px, py)) {
+            return;
+        }
+        if send_hyprland_cmd(&format!("dispatch movecursor {},{}", px, py)) {
+            return;
+        }
+
+        // 2. hyprctl dispatch movecursor CLI
+        if let Ok(st) = std::process::Command::new("hyprctl")
+            .args(["dispatch", "movecursor", &format!("{},{}", px, py)])
+            .status()
+        {
+            if st.success() {
+                return;
+            }
+        }
+        if let Ok(st) = std::process::Command::new("hyprctl")
+            .args(["dispatch", "movecursor", &px.to_string(), &py.to_string()])
+            .status()
+        {
+            if st.success() {
+                return;
+            }
+        }
+
+        // 3. Fallback to ydotool
+        let _ = prepare_ydotool_cmd("mousemove")
+            .args(["--absolute", "-x", &px.to_string(), "-y", &py.to_string()])
+            .status();
+    }
+
     fn init_mouse_worker() {
         WORKER_INIT.call_once(|| {
             std::thread::spawn(|| {
@@ -203,9 +324,7 @@ mod linux_impl {
                         let px = MOUSE_TARGET_X.load(Ordering::Relaxed);
                         let py = MOUSE_TARGET_Y.load(Ordering::Relaxed);
                         if px >= 0 && py >= 0 {
-                            let _ = prepare_ydotool_cmd("mousemove")
-                                .args(["--absolute", "-x", &px.to_string(), "-y", &py.to_string()])
-                                .status();
+                            warp_cursor_position(px, py);
                         }
                     }
                 }
@@ -218,9 +337,7 @@ mod linux_impl {
             let px = MOUSE_TARGET_X.load(Ordering::Relaxed);
             let py = MOUSE_TARGET_Y.load(Ordering::Relaxed);
             if px >= 0 && py >= 0 {
-                let _ = prepare_ydotool_cmd("mousemove")
-                    .args(["--absolute", "-x", &px.to_string(), "-y", &py.to_string()])
-                    .status();
+                warp_cursor_position(px, py);
             }
         }
     }
@@ -229,21 +346,23 @@ mod linux_impl {
         init_mouse_worker();
 
         if is_rel {
-            let _ = prepare_ydotool_cmd("mousemove")
-                .args(["-x", &dx.to_string(), "-y", &dy.to_string()])
-                .spawn();
+            let cmd = format!("dispatch movecursor {:+} {:+}", dx, dy);
+            if !send_hyprland_cmd(&cmd) {
+                let _ = prepare_ydotool_cmd("mousemove")
+                    .args(["-x", &dx.to_string(), "-y", &dy.to_string()])
+                    .spawn();
+            }
         } else {
-            let screen_w = CURRENT_SCREEN_WIDTH.load(Ordering::Relaxed) as f32;
-            let screen_h = CURRENT_SCREEN_HEIGHT.load(Ordering::Relaxed) as f32;
-            let px = (x * screen_w).round() as i32;
-            let py = (y * screen_h).round() as i32;
+            let (screen_w, screen_h, ox, oy) = get_active_monitor_bounds();
+            let px = ox + (x * screen_w).round() as i32;
+            let py = oy + (y * screen_h).round() as i32;
 
             MOUSE_TARGET_X.store(px, Ordering::Relaxed);
             MOUSE_TARGET_Y.store(py, Ordering::Relaxed);
             MOUSE_DIRTY.store(true, Ordering::Release);
 
             if MOVE_LOG_COUNTER.fetch_add(1, Ordering::Relaxed) % 60 == 0 {
-                println!("[Input] Linux MouseMove: ({}, {}) on screen ({}x{})", px, py, screen_w as i32, screen_h as i32);
+                println!("[Input] Linux MouseMove: ({}, {}) on screen ({}x{}, offset: {},{})", px, py, screen_w as i32, screen_h as i32, ox, oy);
             }
         }
     }
