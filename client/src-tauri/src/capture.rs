@@ -1,9 +1,11 @@
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Mutex;
 
 pub static CURRENT_SCREEN_WIDTH: AtomicU32 = AtomicU32::new(1920);
 pub static CURRENT_SCREEN_HEIGHT: AtomicU32 = AtomicU32::new(1080);
 pub static CAPTURE_QUALITY: AtomicU32 = AtomicU32::new(75);
 pub static CAPTURE_SCALE: AtomicU32 = AtomicU32::new(100);
+pub static ACTIVE_MONITOR_NAME: Mutex<Option<String>> = Mutex::new(None);
 
 pub fn set_quality_mode(mode: &str) {
     match mode {
@@ -49,12 +51,65 @@ fn update_jpeg_dimensions(data: &[u8]) {
 }
 
 #[cfg(target_os = "linux")]
+pub fn detect_focused_monitor() -> Option<String> {
+    if let Ok(output) = std::process::Command::new("hyprctl").args(["monitors", "-j"]).output() {
+        if output.status.success() {
+            if let Ok(monitors) = serde_json::from_slice::<Vec<serde_json::Value>>(&output.stdout) {
+                let mon = monitors.iter().find(|m| m["focused"].as_bool().unwrap_or(false))
+                    .or_else(|| monitors.first());
+                if let Some(m) = mon {
+                    if let Some(name) = m["name"].as_str() {
+                        let w = m["width"].as_u64().unwrap_or(1920) as u32;
+                        let h = m["height"].as_u64().unwrap_or(1080) as u32;
+                        if w > 0 && h > 0 {
+                            CURRENT_SCREEN_WIDTH.store(w, Ordering::Relaxed);
+                            CURRENT_SCREEN_HEIGHT.store(h, Ordering::Relaxed);
+                        }
+                        let name_str = name.to_string();
+                        if let Ok(mut lock) = ACTIVE_MONITOR_NAME.lock() {
+                            *lock = Some(name_str.clone());
+                        }
+                        return Some(name_str);
+                    }
+                }
+            }
+        }
+    }
+    // Fallback: grim -l
+    if let Ok(output) = std::process::Command::new("grim").arg("-l").output() {
+        if output.status.success() {
+            let s = String::from_utf8_lossy(&output.stdout);
+            if let Some(line) = s.lines().next() {
+                let name = line.trim();
+                if !name.is_empty() {
+                    let name_str = name.to_string();
+                    if let Ok(mut lock) = ACTIVE_MONITOR_NAME.lock() {
+                        *lock = Some(name_str.clone());
+                    }
+                    return Some(name_str);
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn detect_focused_monitor() -> Option<String> {
+    None
+}
+
+#[cfg(target_os = "linux")]
 fn capture_os() -> Option<Vec<u8>> {
     let q = CAPTURE_QUALITY.load(Ordering::Relaxed).to_string();
     let s = CAPTURE_SCALE.load(Ordering::Relaxed);
 
     let mut cmd = std::process::Command::new("grim");
     cmd.args(["-t", "jpeg", "-q", &q]);
+
+    if let Some(mon) = detect_focused_monitor() {
+        cmd.args(["-o", &mon]);
+    }
 
     let scale_arg;
     if s > 0 && s < 100 {
@@ -71,10 +126,14 @@ fn capture_os() -> Option<Vec<u8>> {
     }
 
     // Fallback scaled capture if hardware requires lower resolution
-    if let Ok(output) = std::process::Command::new("grim")
-        .args(["-s", "0.80", "-t", "jpeg", "-q", "65", "-"])
-        .output()
-    {
+    let mut fallback_cmd = std::process::Command::new("grim");
+    fallback_cmd.args(["-s", "0.80", "-t", "jpeg", "-q", "65"]);
+    if let Some(mon) = detect_focused_monitor() {
+        fallback_cmd.args(["-o", &mon]);
+    }
+    fallback_cmd.arg("-");
+
+    if let Ok(output) = fallback_cmd.output() {
         if output.status.success() && !output.stdout.is_empty() {
             update_jpeg_dimensions(&output.stdout);
             return Some(output.stdout);
@@ -107,24 +166,45 @@ pub fn spawn_h264_recorder_process() -> Result<tokio::process::Child, std::io::E
     // Kill any lingering recorder instance to ensure clean port/device access
     let _ = std::process::Command::new("pkill").arg("-x").arg("wf-recorder").status();
 
-    let encoder_args = if std::path::Path::new("/proc/driver/nvidia/version").exists() {
-        println!("[H264/GPU] Detected NVIDIA GPU -> Using h264_nvenc (Hardware Acceleration, 60fps, 30M, Ultra-Clarity)");
-        "-c h264_nvenc -p preset=p1 -p tune=ull -p b=30M -p g=30 -p bf=0"
-    } else if std::path::Path::new("/dev/dri/renderD128").exists() {
-        println!("[H264/GPU] Detected VA-API GPU (/dev/dri/renderD128) -> Using h264_vaapi (Hardware Acceleration, 60fps, 30M, Ultra-Clarity)");
-        "-c h264_vaapi -d /dev/dri/renderD128 -p b=30M -p g=30 -p bf=0"
-    } else if std::path::Path::new("/dev/dri/renderD129").exists() {
-        println!("[H264/GPU] Detected VA-API GPU (/dev/dri/renderD129) -> Using h264_vaapi (Hardware Acceleration, 60fps, 30M, Ultra-Clarity)");
-        "-c h264_vaapi -d /dev/dri/renderD129 -p b=30M -p g=30 -p bf=0"
-    } else {
-        println!("[H264/CPU] No dedicated hardware encoder node -> Using libx264 ultrafast (CRF 16, 60fps, 30M)");
-        "-c libx264 -p preset=ultrafast -p tune=zerolatency -p crf=16 -p b=30M -p g=30 -p bf=0"
+    let mon_name = detect_focused_monitor();
+    let out_flag = match mon_name {
+        Some(ref m) => format!("-o {}", m),
+        None => "".to_string(),
     };
 
-    // Matroska container streams cleanly to stdout without seeking; ffmpeg remuxes it to Fragmented MP4 with 0% CPU
+    let (hw_args, has_hw) = if std::path::Path::new("/proc/driver/nvidia/version").exists() {
+        println!("[H264/GPU] Detected NVIDIA GPU -> Using h264_nvenc (Hardware Acceleration, 60fps, 30M, Ultra-Clarity)");
+        ("-c h264_nvenc -p preset=p1 -p tune=ull -p b=30M -p g=30 -b 0", true)
+    } else if std::path::Path::new("/dev/dri/renderD128").exists() {
+        println!("[H264/GPU] Detected VA-API GPU (/dev/dri/renderD128) -> Using h264_vaapi (Hardware Acceleration, 60fps, 30M, Ultra-Clarity)");
+        ("-c h264_vaapi -d /dev/dri/renderD128 -p b=30M -p g=30 -b 0", true)
+    } else if std::path::Path::new("/dev/dri/renderD129").exists() {
+        println!("[H264/GPU] Detected VA-API GPU (/dev/dri/renderD129) -> Using h264_vaapi (Hardware Acceleration, 60fps, 30M, Ultra-Clarity)");
+        ("-c h264_vaapi -d /dev/dri/renderD129 -p b=30M -p g=30 -b 0", true)
+    } else {
+        println!("[H264/CPU] No dedicated hardware encoder node -> Using libx264 ultrafast (CRF 16, 60fps, 30M)");
+        ("-c libx264 -p preset=ultrafast -p tune=zerolatency -p crf=16 -p b=30M -p g=30 -b 0", false)
+    };
+
+    let cpu_fallback = "-c libx264 -p preset=ultrafast -p tune=zerolatency -p crf=18 -p b=25M -p g=30 -b 0";
+
+    // Continuous 60fps stream with -D (no-damage), overwrite (-y), zero b-frames (-b 0), and instant packet flush!
+    // If hardware acceleration fails, auto-fallback to CPU libx264 ultrafast!
+    let wf_cmd = if has_hw {
+        format!(
+            "(wf-recorder -D -y {} -m matroska -x yuv420p -r 60 {} -f - 2>/dev/null || wf-recorder -D -y {} -m matroska -x yuv420p -r 60 {} -f -)",
+            out_flag, hw_args, out_flag, cpu_fallback
+        )
+    } else {
+        format!(
+            "wf-recorder -D -y {} -m matroska -x yuv420p -r 60 {} -f -",
+            out_flag, hw_args
+        )
+    };
+
     let pipeline = format!(
-        "wf-recorder -m matroska -x yuv420p -r 60 {} -f - | ffmpeg -hide_banner -loglevel error -f matroska -i - -c:v copy -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof -",
-        encoder_args
+        "{} | ffmpeg -hide_banner -loglevel error -flush_packets 1 -f matroska -i - -c:v copy -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof -",
+        wf_cmd
     );
 
     println!("[H264] Spawning hardware streaming pipeline: {}", pipeline);

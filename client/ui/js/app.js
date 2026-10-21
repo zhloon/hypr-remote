@@ -251,6 +251,9 @@ class HyprRemoteUnifiedApp {
 
       this._updateCanvasLayout();
 
+      // Immediately fetch 1st frame to Canvas (< 50ms) to ensure zero black screen on initial connect
+      this._loadInitialFrame();
+
       // Start Stream: Try Hardware H.264 stream first; fallback to high-speed Canvas loop
       this._startActiveStream();
 
@@ -263,6 +266,33 @@ class HyprRemoteUnifiedApp {
       this.dom.btnConnect.disabled = false;
       this.dom.btnConnect.textContent = '🚀 立即连接';
     }
+  }
+
+  async _loadInitialFrame() {
+    if (!this.activeSession) return;
+    try {
+      const fetchUrl = `http://${this.activeSession.ip}:${this.activeSession.port}/frame?t=${Date.now()}`;
+      const res = await fetch(fetchUrl);
+      if (res.ok) {
+        const blob = await res.blob();
+        if (blob.size > 0) {
+          const bitmap = await createImageBitmap(blob);
+          const canvas = this.dom.remoteCanvas;
+          if (canvas) {
+            canvas.style.display = 'block';
+            if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
+              canvas.width = bitmap.width;
+              canvas.height = bitmap.height;
+              this.remoteWidth = bitmap.width;
+              this.remoteHeight = bitmap.height;
+              this._updateCanvasLayout();
+            }
+            this.ctx?.drawImage(bitmap, 0, 0);
+          }
+          bitmap.close();
+        }
+      }
+    } catch (_) {}
   }
 
   _startActiveStream() {
@@ -369,7 +399,21 @@ class HyprRemoteUnifiedApp {
       }
     };
 
+    let hasPlayed = false;
+    const h264Watchdog = setTimeout(() => {
+      if (!hasPlayed && this.sessionRunning && !this.isH264Active) {
+        console.warn('H.264 stream watchdog timeout (2.5s), auto-falling back to Canvas stream loop');
+        if (this.h264AbortController) {
+          this.h264AbortController.abort();
+          this.h264AbortController = null;
+        }
+        this._startStreamLoop();
+      }
+    }, 2500);
+
     video.onplaying = () => {
+      hasPlayed = true;
+      clearTimeout(h264Watchdog);
       video.style.display = 'block';
       if (canvas) canvas.style.display = 'none';
       if (img) img.style.display = 'none';
@@ -387,11 +431,19 @@ class HyprRemoteUnifiedApp {
       try {
         while (this.sessionRunning && this.activeSession) {
           const { value, done } = await reader.read();
-          if (done) break;
+          if (done) {
+            clearTimeout(h264Watchdog);
+            if (!this.isH264Active && this.sessionRunning) {
+              console.warn('H.264 stream ended before playback, falling back to Canvas stream');
+              this._startStreamLoop();
+            }
+            break;
+          }
           queue.push(value);
           flushQueue();
         }
       } catch (e) {
+        clearTimeout(h264Watchdog);
         if (e.name !== 'AbortError') {
           console.warn('H264 stream closed:', e);
           if (this.sessionRunning && !this.isH264Active) {
@@ -406,15 +458,23 @@ class HyprRemoteUnifiedApp {
 
   _startStreamLoop() {
     this.sessionRunning = true;
+    if (this.isStreamLoopRunning) return;
+    this.isStreamLoopRunning = true;
+    if (this.dom.remoteVideo) {
+      this.dom.remoteVideo.style.display = 'none';
+    }
     this.dom.remoteCanvas.style.display = 'block';
     this.dom.remoteImg.style.display = 'none';
+    this.isH264Active = false;
+    this._updateCanvasLayout();
 
     const canvas = this.dom.remoteCanvas;
     const ctx = this.ctx;
     let failCount = 0;
 
     const streamWorker = async () => {
-      while (this.sessionRunning && this.activeSession) {
+      try {
+        while (this.sessionRunning && this.activeSession && !this.isH264Active) {
         const frameStart = performance.now();
         try {
           const fetchUrl = `http://${this.activeSession.ip}:${this.activeSession.port}/frame?t=${Date.now()}`;
@@ -466,10 +526,13 @@ class HyprRemoteUnifiedApp {
       }
 
       // Fallback: If single frame pull fails, use MJPEG stream directly
-      if (this.sessionRunning && this.activeSession) {
+      if (this.sessionRunning && this.activeSession && !this.isH264Active) {
         canvas.style.display = 'none';
         this.dom.remoteImg.style.display = 'block';
         this.dom.remoteImg.src = `http://${this.activeSession.ip}:${this.activeSession.port}/stream?t=${Date.now()}`;
+      }
+      } finally {
+        this.isStreamLoopRunning = false;
       }
     };
 
@@ -479,6 +542,7 @@ class HyprRemoteUnifiedApp {
   disconnect() {
     this.sessionRunning = false;
     this.isH264Active = false;
+    this.isStreamLoopRunning = false;
     if (this.h264AbortController) {
       this.h264AbortController.abort();
       this.h264AbortController = null;

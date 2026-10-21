@@ -171,7 +171,6 @@ fn dispatch_key(code: u16, down: bool) {
 mod linux_impl {
     use crate::capture::{CURRENT_SCREEN_HEIGHT, CURRENT_SCREEN_WIDTH};
     use std::fs::{File, OpenOptions};
-    use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::io::AsRawFd;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
@@ -388,13 +387,47 @@ mod linux_impl {
         cmd
     }
 
+    fn find_hyprland_socket() -> Option<String> {
+        if let Ok(sig) = std::env::var("HYPRLAND_INSTANCE_SIGNATURE") {
+            if let Ok(runtime) = std::env::var("XDG_RUNTIME_DIR") {
+                let p = format!("{}/hypr/{}/.socket.sock", runtime, sig);
+                if std::path::Path::new(&p).exists() {
+                    return Some(p);
+                }
+            }
+            let p = format!("/tmp/hypr/{}/.socket.sock", sig);
+            if std::path::Path::new(&p).exists() {
+                return Some(p);
+            }
+        }
+        if let Ok(runtime) = std::env::var("XDG_RUNTIME_DIR") {
+            if let Ok(entries) = std::fs::read_dir(format!("{}/hypr", runtime)) {
+                for entry in entries.flatten() {
+                    let sock = entry.path().join(".socket.sock");
+                    if sock.exists() {
+                        return Some(sock.to_string_lossy().to_string());
+                    }
+                }
+            }
+        }
+        if let Ok(entries) = std::fs::read_dir("/tmp/hypr") {
+            for entry in entries.flatten() {
+                let sock = entry.path().join(".socket.sock");
+                if sock.exists() {
+                    return Some(sock.to_string_lossy().to_string());
+                }
+            }
+        }
+        None
+    }
+
     fn get_active_monitor_bounds() -> (f32, f32, i32, i32) {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
         let last = LAST_MONITOR_CHECK.load(Ordering::Relaxed);
-        if now.saturating_sub(last) >= 3 {
+        if now.saturating_sub(last) >= 2 {
             LAST_MONITOR_CHECK.store(now, Ordering::Relaxed);
             if let Ok(output) = std::process::Command::new("hyprctl")
                 .args(["monitors", "-j"])
@@ -402,8 +435,15 @@ mod linux_impl {
             {
                 if output.status.success() {
                     if let Ok(monitors) = serde_json::from_slice::<Vec<serde_json::Value>>(&output.stdout) {
-                        let mon = monitors.iter().find(|m| m["focused"].as_bool().unwrap_or(false))
-                            .or_else(|| monitors.first());
+                        let active_name = crate::capture::ACTIVE_MONITOR_NAME.lock().ok().and_then(|g| g.clone());
+                        let mon = if let Some(ref target) = active_name {
+                            monitors.iter().find(|m| m["name"].as_str() == Some(target.as_str()))
+                                .or_else(|| monitors.iter().find(|m| m["focused"].as_bool().unwrap_or(false)))
+                                .or_else(|| monitors.first())
+                        } else {
+                            monitors.iter().find(|m| m["focused"].as_bool().unwrap_or(false))
+                                .or_else(|| monitors.first())
+                        };
 
                         if let Some(m) = mon {
                             let w = m["width"].as_f64().unwrap_or(1920.0) as f32;
@@ -443,7 +483,28 @@ mod linux_impl {
     }
 
     pub fn dispatch_mouse_move(x: f32, y: f32, dx: i32, dy: i32, is_rel: bool) {
-        // 1. Native Linux /dev/uinput absolute pointer (< 0.05ms, 100% 1:1 pixel overlap)
+        // Priority 1: Direct Hyprland compositor socket warp (< 0.02ms, 0 processes, 100% pixel-perfect)
+        if !is_rel {
+            if let Some(sock_path) = find_hyprland_socket() {
+                let (screen_w, screen_h, ox, oy) = get_active_monitor_bounds();
+                let px = ox + (x * screen_w).round() as i32;
+                let py = oy + (y * screen_h).round() as i32;
+                let cmd = format!("[[BATCH]]dispatch movecursor {} {}\n", px, py);
+                use std::os::unix::net::UnixStream;
+                use std::io::Write;
+                if let Ok(mut sock) = UnixStream::connect(&sock_path) {
+                    if sock.write_all(cmd.as_bytes()).is_ok() {
+                        if MOVE_LOG_COUNTER.fetch_add(1, Ordering::Relaxed) % 120 == 0 {
+                            println!("[Input/Hyprland] movecursor {} {} (norm: {:.3}, {:.3}, bounds: {}x{}+{}+{})",
+                                px, py, x, y, screen_w, screen_h, ox, oy);
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+
+        // Priority 2: Native Linux /dev/uinput absolute or relative pointer (< 0.05ms)
         {
             let uinput_guard = get_uinput();
             if let Some(ref dev) = *uinput_guard {
@@ -465,27 +526,7 @@ mod linux_impl {
             }
         }
 
-        // 2. Direct Hyprland compositor socket warp (0.01ms, 0 processes spawned, 100% pixel-perfect)
-        if !is_rel {
-            if let Ok(sig) = std::env::var("HYPRLAND_INSTANCE_SIGNATURE") {
-                let runtime = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
-                let sock_path = format!("{}/hypr/{}/.socket.sock", runtime, sig);
-                if std::path::Path::new(&sock_path).exists() {
-                    let (screen_w, screen_h, ox, oy) = get_active_monitor_bounds();
-                    let px = ox + (x * screen_w).round() as i32;
-                    let py = oy + (y * screen_h).round() as i32;
-                    let cmd = format!("[[BATCH]]dispatch movecursor {} {}\n", px, py);
-                    use std::os::unix::net::UnixStream;
-                    use std::io::Write;
-                    if let Ok(mut sock) = UnixStream::connect(&sock_path) {
-                        let _ = sock.write_all(cmd.as_bytes());
-                        return;
-                    }
-                }
-            }
-        }
-
-        // 3. Coalesced fallback worker via ydotool (single-slot buffer prevents process congestion)
+        // Priority 3: Coalesced fallback worker via ydotool
         submit_coalesced_mouse_move(x, y, dx, dy, is_rel);
     }
 

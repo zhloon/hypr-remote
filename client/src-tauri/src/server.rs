@@ -125,7 +125,11 @@ impl EmbeddedHostServer {
 
         // 1. High-Speed Single Frame (Zero Buffer Bloat for GPU Canvas): GET /frame
         if method == "GET" && path.starts_with("/frame") {
-            let frame_bytes = self.frame_rx.borrow().clone();
+            let mut frame_bytes = self.frame_rx.borrow().clone();
+            if frame_bytes.is_empty() {
+                let (bytes, _) = capture_desktop_frame();
+                frame_bytes = bytes;
+            }
             let header = format!(
                 "HTTP/1.1 200 OK\r\n\
                 Content-Type: image/jpeg\r\n\
@@ -280,6 +284,26 @@ impl EmbeddedHostServer {
                 None => return,
             };
 
+            // Pre-read first fragment with 2.5s timeout to guarantee encoder is producing valid data!
+            let mut first_chunk = [0u8; 8192];
+            let first_bytes = match tokio::time::timeout(
+                Duration::from_millis(2500),
+                stdout.read(&mut first_chunk),
+            ).await {
+                Ok(Ok(n)) if n > 0 => n,
+                _ => {
+                    eprintln!("[H264] Recorder did not produce data in time, signaling fallback...");
+                    let _ = child.kill().await;
+                    let response = "HTTP/1.1 503 Service Unavailable\r\n\
+                        Content-Type: text/plain\r\n\
+                        Access-Control-Allow-Origin: *\r\n\
+                        Content-Length: 26\r\n\r\n\
+                        Encoder output unavailable";
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    return;
+                }
+            };
+
             let header = "HTTP/1.1 200 OK\r\n\
                 Content-Type: video/mp4\r\n\
                 Connection: close\r\n\
@@ -293,9 +317,14 @@ impl EmbeddedHostServer {
                 return;
             }
 
-            println!("[H264] Live H.264 hardware video stream started for client");
+            if stream.write_all(&first_chunk[..first_bytes]).await.is_err() {
+                let _ = child.kill().await;
+                return;
+            }
 
-            // Pipe encoder stdout directly into client TCP socket
+            println!("[H264] Live H.264 hardware video stream started for client (initial chunk: {} bytes)", first_bytes);
+
+            // Pipe remaining encoder stdout directly into client TCP socket
             let _ = tokio::io::copy(&mut stdout, &mut stream).await;
 
             let _ = child.kill().await;
