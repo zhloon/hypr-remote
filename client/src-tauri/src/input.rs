@@ -23,7 +23,7 @@ pub fn handle_control_message(msg: ControlMessage) {
 }
 
 // ==========================================
-// macOS Input Implementation (Retina-aware)
+// macOS Input Implementation (Direct Warp + Session Tap)
 // ==========================================
 #[cfg(target_os = "macos")]
 mod sys {
@@ -52,6 +52,8 @@ mod sys {
 
     #[link(name = "ApplicationServices", kind = "framework")]
     extern "C" {
+        // CGWarpMouseCursorPosition moves cursor directly without requiring Accessibility permissions!
+        pub fn CGWarpMouseCursorPosition(new_cursor_position: CGPoint) -> i32;
         pub fn CGEventCreateMouseEvent(
             source: *mut c_void,
             mouse_type: u32,
@@ -75,7 +77,7 @@ mod sys {
         pub fn CGDisplayBounds(display: u32) -> CGRect;
     }
 
-    pub const K_CG_HID_EVENT_TAP: u32 = 0;
+    pub const K_CG_SESSION_EVENT_TAP: u32 = 1;
     pub const K_CG_EVENT_LEFT_MOUSE_DOWN: u32 = 1;
     pub const K_CG_EVENT_LEFT_MOUSE_UP: u32 = 2;
     pub const K_CG_EVENT_RIGHT_MOUSE_DOWN: u32 = 3;
@@ -87,7 +89,6 @@ mod sys {
 fn dispatch_mouse_move(x: f32, y: f32, _dx: i32, _dy: i32, _is_rel: bool) {
     unsafe {
         let display = sys::CGMainDisplayID();
-        // CGDisplayBounds returns logical points, preventing Retina 2x drift!
         let bounds = sys::CGDisplayBounds(display);
 
         let pt = sys::CGPoint {
@@ -95,6 +96,10 @@ fn dispatch_mouse_move(x: f32, y: f32, _dx: i32, _dy: i32, _is_rel: bool) {
             y: (y as f64) * bounds.size.height,
         };
 
+        // 1. Move cursor directly (zero permission requirements)
+        sys::CGWarpMouseCursorPosition(pt);
+
+        // 2. Dispatch event to window server
         let ev = sys::CGEventCreateMouseEvent(
             std::ptr::null_mut(),
             sys::K_CG_EVENT_MOUSE_MOVED,
@@ -102,7 +107,7 @@ fn dispatch_mouse_move(x: f32, y: f32, _dx: i32, _dy: i32, _is_rel: bool) {
             0,
         );
         if !ev.is_null() {
-            sys::CGEventPost(sys::K_CG_HID_EVENT_TAP, ev);
+            sys::CGEventPost(sys::K_CG_SESSION_EVENT_TAP, ev);
             sys::CFRelease(ev);
         }
     }
@@ -126,7 +131,7 @@ fn dispatch_mouse_button(btn: u8, down: bool) {
         let pt = sys::CGPoint { x: 0.0, y: 0.0 };
         let ev = sys::CGEventCreateMouseEvent(std::ptr::null_mut(), ev_type, pt, cg_btn);
         if !ev.is_null() {
-            sys::CGEventPost(sys::K_CG_HID_EVENT_TAP, ev);
+            sys::CGEventPost(sys::K_CG_SESSION_EVENT_TAP, ev);
             sys::CFRelease(ev);
         }
     }
@@ -142,7 +147,7 @@ fn dispatch_mouse_wheel(_dx: i32, dy: i32) {
             -dy * 3,
         );
         if !ev.is_null() {
-            sys::CGEventPost(sys::K_CG_HID_EVENT_TAP, ev);
+            sys::CGEventPost(sys::K_CG_SESSION_EVENT_TAP, ev);
             sys::CFRelease(ev);
         }
     }
@@ -153,7 +158,7 @@ fn dispatch_key(code: u16, down: bool) {
     unsafe {
         let ev = sys::CGEventCreateKeyboardEvent(std::ptr::null_mut(), code, down);
         if !ev.is_null() {
-            sys::CGEventPost(sys::K_CG_HID_EVENT_TAP, ev);
+            sys::CGEventPost(sys::K_CG_SESSION_EVENT_TAP, ev);
             sys::CFRelease(ev);
         }
     }
@@ -165,12 +170,10 @@ fn dispatch_key(code: u16, down: bool) {
 #[cfg(target_os = "linux")]
 fn dispatch_mouse_move(x: f32, y: f32, dx: i32, dy: i32, is_rel: bool) {
     if is_rel {
-        // Relative mouse delta (e.g. pointer lock mode)
         let _ = std::process::Command::new("hyprctl")
             .args(["dispatch", "movecursor", &format!("{:+}", dx), &format!("{:+}", dy)])
             .spawn();
     } else {
-        // Pixel-perfect absolute coordinate derived from captured screen resolution
         let screen_w = CURRENT_SCREEN_WIDTH.load(Ordering::Relaxed) as f32;
         let screen_h = CURRENT_SCREEN_HEIGHT.load(Ordering::Relaxed) as f32;
         let px = (x * screen_w) as i32;

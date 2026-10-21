@@ -138,13 +138,13 @@ body {
   margin-top: 2px;
 }
 
-.code-box, .pin-box {
+.code-box, .ip-box, .pin-box {
   display: flex;
   flex-direction: column;
   gap: 6px;
 }
 
-.code-box label, .pin-box label, .field-group label {
+.code-box label, .ip-box label, .pin-box label, .field-group label {
   font-size: 11px;
   text-transform: uppercase;
   color: var(--text-muted);
@@ -152,7 +152,7 @@ body {
   letter-spacing: 0.5px;
 }
 
-.code-display, .pin-display {
+.code-display, .ip-display, .pin-display {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -168,6 +168,13 @@ body {
   letter-spacing: 3px;
   color: var(--accent-cyan);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.ip-text {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--accent-green);
+  font-family: ui-monospace, monospace;
 }
 
 .pin-text {
@@ -437,4 +444,7 @@ body {
   max-height: 100%;
   object-fit: contain;
   cursor: default;
+  image-rendering: -webkit-optimize-contrast;
+  image-rendering: crisp-edges;
+  transform: translateZ(0);
 }

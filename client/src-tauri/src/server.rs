@@ -5,20 +5,44 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::watch;
 
 pub struct EmbeddedHostServer {
     pub port: u16,
     pub pin: String,
+    frame_tx: watch::Sender<Vec<u8>>,
+    frame_rx: watch::Receiver<Vec<u8>>,
 }
 
 impl EmbeddedHostServer {
     pub fn new(port: u16, pin: String) -> Self {
-        Self { port, pin }
+        let (frame_tx, frame_rx) = watch::channel(Vec::new());
+        Self {
+            port,
+            pin,
+            frame_tx,
+            frame_rx,
+        }
     }
 
     pub fn start_background(self: Arc<Self>) {
+        // Task 1: Dedicated High-FPS Frame Capture Engine (decoupled from network)
+        let tx = self.frame_tx.clone();
         tauri::async_runtime::spawn(async move {
-            let addr = format!("0.0.0.0:{}", self.port);
+            loop {
+                let (frame_bytes, _) = capture_desktop_frame();
+                if !frame_bytes.is_empty() {
+                    let _ = tx.send(frame_bytes);
+                }
+                // ~50 FPS capture loop
+                tokio::time::sleep(Duration::from_millis(18)).await;
+            }
+        });
+
+        // Task 2: High-Performance TCP Streaming Server
+        let this = self.clone();
+        tauri::async_runtime::spawn(async move {
+            let addr = format!("0.0.0.0:{}", this.port);
             let listener = match TcpListener::bind(&addr).await {
                 Ok(l) => {
                     println!("[HostServer] Running embedded host server on http://{}", addr);
@@ -32,7 +56,7 @@ impl EmbeddedHostServer {
 
             loop {
                 if let Ok((stream, _peer)) = listener.accept().await {
-                    let server = self.clone();
+                    let server = this.clone();
                     tauri::async_runtime::spawn(async move {
                         server.handle_connection(stream).await;
                     });
@@ -64,7 +88,7 @@ impl EmbeddedHostServer {
         let method = parts[0];
         let path = parts[1];
 
-        // 1. MJPEG Screen Stream: GET /stream
+        // 1. High-FPS MJPEG Screen Stream: GET /stream
         if method == "GET" && path.starts_with("/stream") {
             let response_headers = "HTTP/1.1 200 OK\r\n\
                 Connection: close\r\n\
@@ -78,14 +102,23 @@ impl EmbeddedHostServer {
                 return;
             }
 
-            // Stream frames at ~40 FPS
+            let mut rx = self.frame_rx.clone();
+
             loop {
-                let (frame_bytes, mime_type) = capture_desktop_frame();
+                // Wait for the next fresh frame from the capture engine
+                if rx.changed().await.is_err() {
+                    break;
+                }
+
+                let frame_bytes = rx.borrow().clone();
+                if frame_bytes.is_empty() {
+                    continue;
+                }
+
                 let part_header = format!(
                     "--hyprframe\r\n\
-                    Content-Type: {}\r\n\
+                    Content-Type: image/jpeg\r\n\
                     Content-Length: {}\r\n\r\n",
-                    mime_type,
                     frame_bytes.len()
                 );
 
@@ -98,13 +131,10 @@ impl EmbeddedHostServer {
                 if stream.write_all(b"\r\n").await.is_err() {
                     break;
                 }
-
-                tokio::time::sleep(Duration::from_millis(25)).await;
             }
         }
         // 2. Input Control Event: POST /input
         else if method == "POST" && path == "/input" {
-            // Find body after empty line
             if let Some(pos) = request_str.find("\r\n\r\n") {
                 let body = &request_str[pos + 4..];
                 if let Ok(msg) = serde_json::from_str::<ControlMessage>(body) {

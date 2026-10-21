@@ -40,6 +40,14 @@
           </div>
         </div>
 
+        <div class="ip-box">
+          <label>本机局域网 IP (直连备用)</label>
+          <div class="ip-display">
+            <span id="my-ip" class="ip-text">127.0.0.1:18080</span>
+            <button id="btn-copy-ip" class="btn-icon" title="复制 IP 地址">📋</button>
+          </div>
+        </div>
+
         <div class="pin-box">
           <label>访问验证码 (PIN)</label>
           <div class="pin-display">
@@ -60,14 +68,14 @@
           <div class="icon-wrap">🎮</div>
           <div>
             <h2>控制远程设备</h2>
-            <p>输入对方的 6 位连接码发起控制</p>
+            <p>输入对方连接码或局域网 IP 发起控制</p>
           </div>
         </div>
 
         <div class="input-form">
           <div class="field-group">
-            <label for="target-code">伙伴连接码</label>
-            <input type="text" id="target-code" placeholder="例如: 742 819" maxlength="15" autocomplete="off" />
+            <label for="target-code">伙伴连接码 或 IP</label>
+            <input type="text" id="target-code" placeholder="6 位连接码 或 IP (如 192.168.1.105)" maxlength="25" autocomplete="off" />
           </div>
 
           <div class="field-group">

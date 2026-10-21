@@ -15,9 +15,11 @@ class HyprRemoteUnifiedApp {
       sessionView: document.getElementById('session-view'),
       myCode: document.getElementById('my-code'),
       myPin: document.getElementById('my-pin'),
+      myIp: document.getElementById('my-ip'),
       myHostname: document.getElementById('my-hostname'),
       myOs: document.getElementById('my-os'),
       btnCopyCode: document.getElementById('btn-copy-code'),
+      btnCopyIp: document.getElementById('btn-copy-ip'),
       targetCode: document.getElementById('target-code'),
       targetPin: document.getElementById('target-pin'),
       btnConnect: document.getElementById('btn-start-connect'),
@@ -52,6 +54,9 @@ class HyprRemoteUnifiedApp {
         this.myInfo = await window.__TAURI__.core.invoke('get_my_device_info');
         this.dom.myCode.textContent = this.myInfo.code;
         this.dom.myPin.textContent = this.myInfo.pin;
+        if (this.dom.myIp) {
+          this.dom.myIp.textContent = `${this.myInfo.local_ip || '127.0.0.1'}:${this.myInfo.port}`;
+        }
         this.dom.myHostname.textContent = this.myInfo.hostname;
         this.dom.myOs.textContent = this.myInfo.os;
       } catch (e) {
@@ -59,9 +64,12 @@ class HyprRemoteUnifiedApp {
       }
     } else {
       // Mock for browser testing
-      this.myInfo = { code: '849 213', pin: '4820', hostname: 'Browser-Dev', os: 'Web' };
+      this.myInfo = { code: '849 213', pin: '4820', hostname: 'Browser-Dev', os: 'Web', local_ip: '192.168.1.100', port: 18080 };
       this.dom.myCode.textContent = this.myInfo.code;
       this.dom.myPin.textContent = this.myInfo.pin;
+      if (this.dom.myIp) {
+        this.dom.myIp.textContent = `${this.myInfo.local_ip}:${this.myInfo.port}`;
+      }
       this.dom.myHostname.textContent = this.myInfo.hostname;
       this.dom.myOs.textContent = this.myInfo.os;
     }
@@ -75,6 +83,16 @@ class HyprRemoteUnifiedApp {
       this.dom.btnCopyCode.textContent = '✅';
       setTimeout(() => (this.dom.btnCopyCode.textContent = '📋'), 1500);
     });
+
+    // Copy IP button
+    if (this.dom.btnCopyIp) {
+      this.dom.btnCopyIp.addEventListener('click', () => {
+        const text = this.dom.myIp.textContent;
+        navigator.clipboard.writeText(text);
+        this.dom.btnCopyIp.textContent = '✅';
+        setTimeout(() => (this.dom.btnCopyIp.textContent = '📋'), 1500);
+      });
+    }
 
     // Connect button
     this.dom.btnConnect.addEventListener('click', () => this.startConnect());

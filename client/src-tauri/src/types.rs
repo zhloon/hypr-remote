@@ -7,6 +7,7 @@ pub struct MyDeviceInfo {
     pub port: u16,          // e.g. 18080
     pub hostname: String,
     pub os: String,
+    pub local_ip: String,   // Real local LAN IP e.g. "192.168.1.105"
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
