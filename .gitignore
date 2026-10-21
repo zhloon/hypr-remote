@@ -18,6 +18,7 @@ dist/
 !client/src-tauri/icons/*.png
 !client/src-tauri/icons/*.ico
 !client/src-tauri/icons/*.icns
+!client/src-tauri/icons/*.jpg
 
 # IDE & editors
 .vscode/
