@@ -10,6 +10,8 @@ use tokio::sync::watch;
 
 use crate::types::MyDeviceInfo;
 
+pub static LAST_CLIENT_FRAME_TIME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 pub struct EmbeddedHostServer {
     pub port: u16,
     pub pin: String,
@@ -41,7 +43,12 @@ impl EmbeddedHostServer {
                 .spawn(move || {
                     let target_interval = Duration::from_millis(16); // Target ~60 FPS
                     loop {
-                        if tx.receiver_count() > 1 {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        let last = LAST_CLIENT_FRAME_TIME.load(std::sync::atomic::Ordering::Relaxed);
+                        if tx.receiver_count() > 1 || now.saturating_sub(last) < 4 {
                             let start = std::time::Instant::now();
                             let (frame_bytes, _) = capture_desktop_frame();
                             if !frame_bytes.is_empty() {
@@ -125,6 +132,12 @@ impl EmbeddedHostServer {
 
         // 1. High-Speed Single Frame (Zero Buffer Bloat for GPU Canvas): GET /frame
         if method == "GET" && path.starts_with("/frame") {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            LAST_CLIENT_FRAME_TIME.store(now, std::sync::atomic::Ordering::Relaxed);
+
             let mut frame_bytes = self.frame_rx.borrow().clone();
             if frame_bytes.is_empty() {
                 let (bytes, _) = capture_desktop_frame();
@@ -261,6 +274,32 @@ impl EmbeddedHostServer {
                 Access-Control-Allow-Origin: *\r\n\
                 Content-Length: 15\r\n\r\n\
                 {\"status\":\"ok\"}";
+            let _ = stream.write_all(response.as_bytes()).await;
+        }
+        // 5.1 Dynamic Host Resolution Adjustment: GET or POST /set_resolution?res=2560x1440|1920x1080|preferred
+        else if (method == "GET" || method == "POST") && path.starts_with("/set_resolution") {
+            let res = if path.contains("res=2560x1440") {
+                "2560x1440"
+            } else if path.contains("res=1920x1080") {
+                "1920x1080"
+            } else if path.contains("res=3840x2160") {
+                "3840x2160"
+            } else if let Some(idx) = path.find("res=") {
+                let rest = &path[idx + 4..];
+                rest.split('&').next().unwrap_or("preferred")
+            } else {
+                "preferred"
+            };
+            let ok = crate::capture::set_screen_resolution(res);
+            let body = format!("{{\"status\":\"{}\",\"resolution\":\"{}\"}}", if ok { "ok" } else { "failed" }, res);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\n\
+                Content-Type: application/json\r\n\
+                Access-Control-Allow-Origin: *\r\n\
+                Content-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
             let _ = stream.write_all(response.as_bytes()).await;
         }
         // 6. Ultra-Low-Latency Hardware H.264 Video Stream: GET /h264_stream

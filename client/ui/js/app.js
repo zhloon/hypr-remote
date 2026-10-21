@@ -39,12 +39,15 @@ class HyprRemoteUnifiedApp {
       statFps: document.getElementById('stat-fps'),
       statLatency: document.getElementById('stat-latency'),
       btnToggleQuality: document.getElementById('btn-toggle-quality'),
+      btnToggleRes: document.getElementById('btn-toggle-res'),
       btnToggleScale: document.getElementById('btn-toggle-scale'),
       btnToggleFs: document.getElementById('btn-toggle-fs'),
       btnToggleLock: document.getElementById('btn-toggle-lock'),
       btnDisconnect: document.getElementById('btn-disconnect'),
     };
 
+    this.scaleMode = 'fit'; // 'fit' (等比自适应), 'native' (1:1 原生点对点), 'stretch' (全屏铺满)
+    this.currentResIdx = 0;
     this.isH264Active = false;
     this.h264AbortController = null;
     this.currentQualityIdx = 0;
@@ -128,6 +131,10 @@ class HyprRemoteUnifiedApp {
 
     if (this.dom.btnToggleQuality) {
       this.dom.btnToggleQuality.addEventListener('click', () => this.toggleQualityMode());
+    }
+
+    if (this.dom.btnToggleRes) {
+      this.dom.btnToggleRes.addEventListener('click', () => this.toggleResolutionMode());
     }
 
     if (this.dom.btnToggleScale) {
@@ -367,16 +374,18 @@ class HyprRemoteUnifiedApp {
     };
 
     sourceBuffer.addEventListener('updateend', () => {
-      // Auto-chase live edge with zero-lag threshold for instant 60fps rendering
+      // Smooth live-edge catch-up without seek stalls (prevents FPS drops)
       if (video.buffered.length > 0) {
         const end = video.buffered.end(video.buffered.length - 1);
         const delay = end - video.currentTime;
-        if (delay > 0.08) {
-          // Immediately chase live edge without micro-stutter
-          video.currentTime = Math.max(0, end - 0.015);
-        } else if (delay > 0.04) {
+        if (delay > 1.2) {
+          // If severely behind (>1.2s lag spike), jump to live edge with safe 150ms buffer cushion
+          video.currentTime = Math.max(0, end - 0.15);
+        } else if (delay > 0.35) {
+          video.playbackRate = 1.15;
+        } else if (delay > 0.10) {
           video.playbackRate = 1.05;
-        } else {
+        } else if (delay <= 0.03) {
           video.playbackRate = 1.0;
         }
       }
@@ -400,6 +409,23 @@ class HyprRemoteUnifiedApp {
     };
 
     let hasPlayed = false;
+    let hwFrameCount = 0;
+    let hwLastFpsTime = performance.now();
+    const trackHwFrame = () => {
+      if (!this.sessionRunning || !this.isH264Active) return;
+      hwFrameCount++;
+      const now = performance.now();
+      if (now - hwLastFpsTime >= 1000) {
+        const fps = Math.round((hwFrameCount * 1000) / (now - hwLastFpsTime));
+        if (this.dom.statFps) this.dom.statFps.textContent = `${fps} FPS (HW)`;
+        hwFrameCount = 0;
+        hwLastFpsTime = now;
+      }
+      if ('requestVideoFrameCallback' in video) {
+        video.requestVideoFrameCallback(trackHwFrame);
+      }
+    };
+
     const h264Watchdog = setTimeout(() => {
       if (!hasPlayed && this.sessionRunning && !this.isH264Active) {
         console.warn('H.264 stream watchdog timeout (2.5s), auto-falling back to Canvas stream loop');
@@ -422,6 +448,10 @@ class HyprRemoteUnifiedApp {
       if (this.dom.statLatency) this.dom.statLatency.textContent = '< 15ms';
       if (this.dom.btnToggleQuality) this.dom.btnToggleQuality.textContent = '🚀 硬件加速 (H.264)';
       this._updateCanvasLayout();
+
+      if ('requestVideoFrameCallback' in video) {
+        video.requestVideoFrameCallback(trackHwFrame);
+      }
     };
 
     video.play().catch(() => {});
@@ -591,15 +621,60 @@ class HyprRemoteUnifiedApp {
   }
 
   toggleScaleMode() {
-    this.isStretched = !this.isStretched;
-    if (this.dom.remoteVideo) this.dom.remoteVideo.classList.toggle('stretched', this.isStretched);
-    if (this.dom.remoteCanvas) this.dom.remoteCanvas.classList.toggle('stretched', this.isStretched);
-    if (this.dom.remoteImg) this.dom.remoteImg.classList.toggle('stretched', this.isStretched);
+    const modes = ['fit', 'native', 'stretch'];
+    const curIdx = modes.indexOf(this.scaleMode);
+    this.scaleMode = modes[(curIdx + 1) % modes.length];
+
+    const elements = [this.dom.remoteVideo, this.dom.remoteCanvas, this.dom.remoteImg];
+    elements.forEach((el) => {
+      if (!el) return;
+      el.classList.remove('scale-native', 'scale-stretch');
+      if (this.scaleMode === 'native') el.classList.add('scale-native');
+      if (this.scaleMode === 'stretch') el.classList.add('scale-stretch');
+    });
+
     if (this.dom.btnToggleScale) {
-      this.dom.btnToggleScale.textContent = this.isStretched ? '原始比例' : '铺满全屏';
-      this.dom.btnToggleScale.classList.toggle('active', this.isStretched);
+      if (this.scaleMode === 'fit') {
+        this.dom.btnToggleScale.textContent = '📐 缩放: 等比自适应';
+        this.dom.btnToggleScale.classList.remove('active');
+      } else if (this.scaleMode === 'native') {
+        this.dom.btnToggleScale.textContent = '🎯 缩放: 1:1 原生点对点';
+        this.dom.btnToggleScale.classList.add('active');
+      } else {
+        this.dom.btnToggleScale.textContent = '↔️ 缩放: 全屏铺满';
+        this.dom.btnToggleScale.classList.add('active');
+      }
     }
     this._updateCanvasLayout();
+  }
+
+  async toggleResolutionMode() {
+    if (!this.activeSession) return;
+    const resOptions = [
+      { id: '2560x1440', label: '🖥️ 分辨率: 2K (1440P)' },
+      { id: '1920x1080', label: '🖥️ 分辨率: 1080P' },
+      { id: 'preferred', label: '🖥️ 分辨率: 默认推荐' },
+    ];
+    this.currentResIdx = ((this.currentResIdx || 0) + 1) % resOptions.length;
+    const opt = resOptions[this.currentResIdx];
+    if (this.dom.btnToggleRes) {
+      this.dom.btnToggleRes.textContent = opt.label;
+    }
+
+    try {
+      const url = `http://${this.activeSession.ip}:${this.activeSession.port}/set_resolution?res=${opt.id}`;
+      await fetch(url, { method: 'POST' });
+      // If H264 was active, briefly wait for Hyprland to resize and reconnect
+      if (this.isH264Active) {
+        setTimeout(() => {
+          if (this.sessionRunning && this.activeSession) {
+            this._startH264Stream().catch(() => this._startStreamLoop());
+          }
+        }, 400);
+      }
+    } catch (e) {
+      console.warn('Failed to set remote resolution:', e);
+    }
   }
 
   toggleQualityMode() {
@@ -661,17 +736,26 @@ class HyprRemoteUnifiedApp {
     const el = this._getActiveElement();
     if (!el) return;
 
-    if (this.isStretched) {
+    const nw = this.remoteWidth || el.videoWidth || el.naturalWidth || el.width || 1920;
+    const nh = this.remoteHeight || el.videoHeight || el.naturalHeight || el.height || 1080;
+
+    if (this.scaleMode === 'stretch') {
       el.style.width = '100vw';
       el.style.height = '100vh';
       return;
     }
 
+    if (this.scaleMode === 'native') {
+      // 1:1 pixel-perfect mapping (1080p displayed exactly 1920x1080 on 2K screen without interpolation blur)
+      el.style.width = `${nw}px`;
+      el.style.height = `${nh}px`;
+      return;
+    }
+
+    // Default 'fit' mode: strictly preserve aspect ratio without stretching
     const viewport = document.querySelector('.screen-viewport');
     const vw = viewport ? viewport.clientWidth : window.innerWidth;
     const vh = viewport ? viewport.clientHeight : window.innerHeight;
-    const nw = this.remoteWidth || el.videoWidth || el.naturalWidth || el.width || 1920;
-    const nh = this.remoteHeight || el.videoHeight || el.naturalHeight || el.height || 1080;
 
     const vRatio = vw / vh;
     const rRatio = nw / nh;

@@ -455,15 +455,29 @@ body {
   image-rendering: -webkit-optimize-contrast;
   image-rendering: crisp-edges;
   transform: translateZ(0);
-  object-fit: fill !important;
+  object-fit: contain !important;
+  transition: opacity 0.15s ease;
 }
 
-#remote-screen-video.stretched,
-#remote-screen-canvas.stretched,
-#remote-screen-img.stretched {
+/* 1:1 Native Non-Stretched Pixel-Perfect Mode */
+#remote-screen-video.scale-native,
+#remote-screen-canvas.scale-native,
+#remote-screen-img.scale-native {
+  width: auto !important;
+  height: auto !important;
+  max-width: none !important;
+  max-height: none !important;
+  object-fit: none !important;
+}
+
+/* Stretch Fullscreen Mode */
+#remote-screen-video.scale-stretch,
+#remote-screen-canvas.scale-stretch,
+#remote-screen-img.scale-stretch {
   width: 100vw !important;
   height: 100vh !important;
   max-width: none !important;
   max-height: none !important;
+  object-fit: fill !important;
 }
 
