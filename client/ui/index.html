@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>HyprRemote - 统一跨平台远程控制</title>
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <!-- Main Home Panel (When not in remote session) -->
+  <div id="home-view" class="home-container">
+    <header class="app-header">
+      <div class="brand">
+        <span class="brand-icon">⚡</span>
+        <span class="brand-name">HyprRemote</span>
+        <span class="brand-tag">Wayland & Cross-Platform</span>
+      </div>
+      <div class="system-status">
+        <span class="status-dot"></span>
+        <span id="service-status-text">服务就绪 · 局域网在线</span>
+      </div>
+    </header>
+
+    <main class="cards-layout">
+      <!-- Left Card: Allow Remote Control (Controlled) -->
+      <section class="card allow-card">
+        <div class="card-header">
+          <div class="icon-wrap">🛡️</div>
+          <div>
+            <h2>允许远程协助</h2>
+            <p>将此连接码提供给主控端以建立连接</p>
+          </div>
+        </div>
+
+        <div class="code-box">
+          <label>本机连接码</label>
+          <div class="code-display">
+            <span id="my-code" class="code-text">--- ---</span>
+            <button id="btn-copy-code" class="btn-icon" title="复制连接码">📋</button>
+          </div>
+        </div>
+
+        <div class="pin-box">
+          <label>访问验证码 (PIN)</label>
+          <div class="pin-display">
+            <span id="my-pin" class="pin-text">----</span>
+            <button id="btn-refresh-pin" class="btn-icon" title="刷新密码">🔄</button>
+          </div>
+        </div>
+
+        <div class="device-meta">
+          <span>本机名称: <strong id="my-hostname">--</strong></span>
+          <span>系统环境: <strong id="my-os">--</strong></span>
+        </div>
+      </section>
+
+      <!-- Right Card: Control Remote Device (Controller) -->
+      <section class="card control-card">
+        <div class="card-header">
+          <div class="icon-wrap">🎮</div>
+          <div>
+            <h2>控制远程设备</h2>
+            <p>输入对方的 6 位连接码发起控制</p>
+          </div>
+        </div>
+
+        <div class="input-form">
+          <div class="field-group">
+            <label for="target-code">伙伴连接码</label>
+            <input type="text" id="target-code" placeholder="例如: 742 819" maxlength="15" autocomplete="off" />
+          </div>
+
+          <div class="field-group">
+            <label for="target-pin">访问验证码 (可选)</label>
+            <input type="password" id="target-pin" placeholder="若对方设置了密码请输入" maxlength="8" />
+          </div>
+
+          <button id="btn-start-connect" class="btn-connect">
+            <span>🚀 立即连接</span>
+          </button>
+        </div>
+
+        <div class="quick-hints">
+          💡 提示: 局域网内设备启动本客户端后会自动发现，支持双向互相控制。
+        </div>
+      </section>
+    </main>
+
+    <!-- Bottom Section: Discovered LAN Devices -->
+    <section class="lan-devices-section">
+      <div class="section-title">
+        <span>📡 局域网在线设备</span>
+        <span id="lan-count" class="badge">0 台在线</span>
+      </div>
+      <div id="lan-device-list" class="device-grid">
+        <div class="empty-lan">正在监听局域网设备广播，启动同一局域网内的 HyprRemote 即可显示...</div>
+      </div>
+    </section>
+  </div>
+
+  <!-- Remote Desktop View (Active Session) -->
+  <div id="session-view" class="session-container" style="display: none;">
+    <!-- Floating Header Bar -->
+    <nav class="session-nav">
+      <div class="session-info">
+        <span class="session-tag">正在控制</span>
+        <span id="session-target-title">远程主机</span>
+      </div>
+
+      <div class="session-stats">
+        <span id="stat-fps">30 FPS</span>
+        <span class="stat-div">|</span>
+        <span id="stat-latency">&lt; 10ms</span>
+      </div>
+
+      <div class="session-actions">
+        <button id="btn-toggle-lock" class="tool-btn">锁定光标</button>
+        <button id="btn-toggle-fs" class="tool-btn">全屏</button>
+        <button id="btn-disconnect" class="tool-btn btn-danger">断开</button>
+      </div>
+    </nav>
+
+    <!-- Remote Screen Render Area -->
+    <div class="screen-viewport" id="screen-viewport">
+      <img id="remote-screen-img" alt="Remote Screen" />
+    </div>
+  </div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
