@@ -457,10 +457,9 @@ impl EmbeddedHostServer {
                 return;
             }
 
-            println!("[H264] Live H.264 hardware video stream started for client (initial chunk: {} bytes)", first_bytes);
-
-            // Pipe remaining encoder stdout directly into client TCP socket
-            let _ = tokio::io::copy(&mut stdout, &mut stream).await;
+            // Pipe remaining encoder stdout directly into client TCP socket with high-throughput 64KB buffer
+            let mut reader = tokio::io::BufReader::with_capacity(65536, stdout);
+            let _ = tokio::io::copy(&mut reader, &mut stream).await;
 
             let _ = child.kill().await;
             println!("[H264] Client disconnected, stopped H.264 recorder");

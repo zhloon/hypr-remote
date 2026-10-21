@@ -527,6 +527,8 @@ body {
   image-rendering: -webkit-optimize-contrast;
   image-rendering: crisp-edges;
   transform: translateZ(0);
+  will-change: transform;
+  backface-visibility: hidden;
   object-fit: contain !important;
   transition: opacity 0.15s ease;
 }

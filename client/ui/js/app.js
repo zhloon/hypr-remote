@@ -394,6 +394,8 @@ class HyprRemoteUnifiedApp {
     const img = this.dom.remoteImg;
 
     const mimeTypes = [
+      'video/mp4; codecs="avc1.640034"',
+      'video/mp4; codecs="avc1.640033"',
       'video/mp4; codecs="avc1.64002A"',
       'video/mp4; codecs="avc1.640028"',
       'video/mp4; codecs="avc1.4D401F"',
@@ -411,6 +413,10 @@ class HyprRemoteUnifiedApp {
     video.muted = true;
     video.autoplay = true;
     video.playsInline = true;
+    video.controls = false;
+    video.disablePictureInPicture = true;
+    video.setAttribute('playsinline', '');
+    video.setAttribute('webkit-playsinline', '');
 
     const mediaSource = new MediaSource();
     video.src = URL.createObjectURL(mediaSource);
