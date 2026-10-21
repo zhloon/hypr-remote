@@ -121,25 +121,32 @@ async fn send_input_to_remote(
     tauri::async_runtime::spawn(async move {
         let addr_str = format!("{}:{}", tip, tport);
         if let Ok(addr) = addr_str.parse::<std::net::SocketAddr>() {
-            if let Ok(mut stream) = tokio::net::TcpStream::connect(addr).await {
-                let _ = stream.set_nodelay(true);
-                let init_req = format!(
-                    "POST /input_stream HTTP/1.1\r\n\
-                    Host: {}\r\n\
-                    Content-Type: text/plain\r\n\
-                    Connection: keep-alive\r\n\r\n",
-                    addr_str
-                );
-                use tokio::io::AsyncWriteExt;
-                if stream.write_all(init_req.as_bytes()).await.is_ok() {
-                    while let Some(m) = rx.recv().await {
-                        if let Ok(serialized) = serde_json::to_string(&m) {
-                            let line = format!("{}\n", serialized);
-                            if stream.write_all(line.as_bytes()).await.is_err() {
-                                break;
+            match tokio::net::TcpStream::connect(addr).await {
+                Ok(mut stream) => {
+                    let _ = stream.set_nodelay(true);
+                    let init_req = format!(
+                        "POST /input_stream HTTP/1.1\r\n\
+                        Host: {}\r\n\
+                        Content-Type: text/plain\r\n\
+                        Connection: keep-alive\r\n\r\n",
+                        addr_str
+                    );
+                    use tokio::io::AsyncWriteExt;
+                    if stream.write_all(init_req.as_bytes()).await.is_ok() {
+                        println!("[InputClient] Connected input stream to {}", addr_str);
+                        while let Some(m) = rx.recv().await {
+                            if let Ok(serialized) = serde_json::to_string(&m) {
+                                let line = format!("{}\n", serialized);
+                                if stream.write_all(line.as_bytes()).await.is_err() {
+                                    eprintln!("[InputClient] Write failed, connection lost to {}", addr_str);
+                                    break;
+                                }
                             }
                         }
                     }
+                }
+                Err(e) => {
+                    eprintln!("[InputClient] Could not connect input stream to {}: {}", addr_str, e);
                 }
             }
         }

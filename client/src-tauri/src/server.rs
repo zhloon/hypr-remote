@@ -175,14 +175,17 @@ impl EmbeddedHostServer {
                 return;
             }
 
+            println!("[HostServer] Client connected to persistent /input_stream");
+
             // Parse any input messages already received in header buffer
             if let Some(pos) = request_str.find("\r\n\r\n") {
                 let initial = &request_str[pos + 4..];
                 for line in initial.lines() {
                     let trimmed = line.trim();
                     if !trimmed.is_empty() {
-                        if let Ok(msg) = serde_json::from_str::<ControlMessage>(trimmed) {
-                            handle_control_message(msg);
+                        match serde_json::from_str::<ControlMessage>(trimmed) {
+                            Ok(msg) => handle_control_message(msg),
+                            Err(e) => eprintln!("[HostServer] Initial input parse error: {} on '{}'", e, trimmed),
                         }
                     }
                 }
@@ -194,19 +197,22 @@ impl EmbeddedHostServer {
             while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
                 let trimmed = line.trim();
                 if !trimmed.is_empty() {
-                    if let Ok(msg) = serde_json::from_str::<ControlMessage>(trimmed) {
-                        handle_control_message(msg);
+                    match serde_json::from_str::<ControlMessage>(trimmed) {
+                        Ok(msg) => handle_control_message(msg),
+                        Err(e) => eprintln!("[HostServer] Stream input parse error: {} on '{}'", e, trimmed),
                     }
                 }
                 line.clear();
             }
+            println!("[HostServer] Client disconnected from persistent /input_stream");
         }
         // 4. One-off Input Control Event: POST /input
         else if method == "POST" && path == "/input" {
             if let Some(pos) = request_str.find("\r\n\r\n") {
                 let body = &request_str[pos + 4..];
-                if let Ok(msg) = serde_json::from_str::<ControlMessage>(body) {
-                    handle_control_message(msg);
+                match serde_json::from_str::<ControlMessage>(body) {
+                    Ok(msg) => handle_control_message(msg),
+                    Err(e) => eprintln!("[HostServer] POST /input parse error: {} on '{}'", e, body),
                 }
             }
 

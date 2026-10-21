@@ -18,9 +18,28 @@ elif command -v apt-get >/dev/null 2>&1; then
 fi
 
 # 2. 自动配置 input 组与虚拟键鼠服务
-echo "[2/3] 检查 Hyprland 键鼠控制权限与防火墙..."
+echo "[2/3] 检查 Hyprland 键鼠控制权限与虚拟设备服务..."
 sudo usermod -aG input "$USER" 2>/dev/null || true
-sudo systemctl enable --now ydotool 2>/dev/null || systemctl --user enable --now ydotoold 2>/dev/null || true
+sudo chmod 666 /dev/uinput 2>/dev/null || true
+
+# 配置 udev 规则保证永久具备 uinput 读写权限
+if [ ! -f /etc/udev/rules.d/99-uinput.rules ]; then
+    echo 'KERNEL=="uinput", GROUP="input", MODE="0666"' | sudo tee /etc/udev/rules.d/99-uinput.rules >/dev/null 2>&1 || true
+    sudo udevadm control --reload-rules 2>/dev/null || true
+    sudo udevadm trigger 2>/dev/null || true
+fi
+
+# 确保 ydotoold 虚拟键鼠守护服务正在运行
+if ! pgrep -x ydotoold >/dev/null 2>&1; then
+    echo "⚡ 正在启动 ydotoold 虚拟键鼠后台服务..."
+    sudo systemctl enable --now ydotool 2>/dev/null || systemctl --user enable --now ydotoold 2>/dev/null || true
+    sleep 0.3
+    if ! pgrep -x ydotoold >/dev/null 2>&1; then
+        sudo ydotoold --socket-path=/tmp/.ydotool_socket --socket-perm=0666 >/dev/null 2>&1 &
+        sleep 0.5
+    fi
+fi
+export YDOTOOL_SOCKET="/tmp/.ydotool_socket"
 
 # 自动放行局域网控制端口 (TCP 18080 + UDP 8082)
 if command -v ufw >/dev/null 2>&1; then
